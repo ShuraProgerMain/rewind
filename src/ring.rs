@@ -29,6 +29,11 @@ impl Ring {
         self.bytes
     }
 
+    /// Time of the newest picture in the buffer, microseconds on the pipeline clock.
+    pub fn last_us(&self) -> i64 {
+        self.last_us
+    }
+
     /// Length of the stored history in microseconds.
     pub fn span(&self) -> i64 {
         self.q.front().map_or(0, |first| self.last_us - first.us)
@@ -40,7 +45,8 @@ impl Ring {
             return;
         }
         if pkt.stream == 0 {
-            self.last_us = pkt.us;
+            // With B-frames pictures arrive out of display order: keep the latest moment seen.
+            self.last_us = self.last_us.max(pkt.us);
         }
         self.bytes += pkt.data.len();
         self.q.push_back(pkt);

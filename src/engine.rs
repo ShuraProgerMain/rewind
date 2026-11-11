@@ -211,6 +211,10 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
     let mut force_key = false;
     let mut last_idx: i64 = -1;
     let mut exit = Exit::Idle;
+    // "Save" pressed: the encoder still holds the last few pictures (B-frames and its own
+    // queue), so the clip is cut once the picture of that moment has come out. Holds the
+    // moment of the press (pipeline clock, us) and the latest tick to give up waiting at.
+    let mut pending_save: Option<(i64, i64)> = None;
 
     // Counters for the periodic status line.
     let (mut n_new, mut n_dup, mut n_skipped, mut n_bytes) = (0u32, 0u32, 0i64, 0usize);
@@ -244,11 +248,11 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
                     Cmd::SaveClip => {
-                        let pk = if st.buffer_on { ring.snapshot(span_us) } else { Vec::new() };
-                        if pk.is_empty() {
+                        if !st.buffer_on || ring.bytes() == 0 {
                             emit(Event::NothingToSave);
-                        } else {
-                            let _ = wtx.send(WMsg::Save(pk, out_path(&cfg.out_dir, "Clip")?));
+                        } else if pending_save.is_none() {
+                            let pressed_us = idx * 1_000_000 / cfg.fps as i64;
+                            pending_save = Some((pressed_us, idx + cfg.fps as i64)); // wait at most 1 s
                         }
                     }
                     Cmd::ToggleRecord => st.want_rec = !st.want_rec,
@@ -296,6 +300,17 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                 }
                 if buffer_on {
                     ring.push(p);
+                }
+            }
+            if let Some((pressed_us, give_up)) = pending_save {
+                if ring.last_us() >= pressed_us || idx >= give_up || !st.buffer_on {
+                    pending_save = None;
+                    let pk = if st.buffer_on { ring.snapshot(span_us) } else { Vec::new() };
+                    if pk.is_empty() {
+                        emit(Event::NothingToSave);
+                    } else {
+                        let _ = wtx.send(WMsg::Save(pk, out_path(&cfg.out_dir, "Clip")?));
+                    }
                 }
             }
             if sent {

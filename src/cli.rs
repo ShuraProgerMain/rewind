@@ -36,8 +36,8 @@ rewind cli - recording engine test harness
   --crop X,Y,W,H         record only this area of the source
   --fps N                frames per second (default 60)
   --codec hevc|h264|av1  (default hevc)
-  --quality N            constant quality, lower = better (default 24)
-  --max-mbit N           bitrate ceiling in Mbit/s (default 50)
+  --quality N            constant quality, lower = better (default 20)
+  --max-mbit N           bitrate ceiling in Mbit/s (default 100)
   --buffer SECONDS       replay buffer length, 0 = off (default 600)
   --ring-mb N            memory limit of the replay buffer (default 4096)
   --out DIR              output folder (default: Videos\\Rewind)
@@ -58,7 +58,7 @@ fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
     let mut cfg = Config {
         source: Source::Monitor(0),
         fps: 60,
-        video: VideoCfg { codec: Codec::Hevc, quality: 24, max_bitrate: 50_000_000, gop_secs: 2 },
+        video: VideoCfg { codec: Codec::Hevc, quality: 20, max_bitrate: 100_000_000, gop_secs: 2 },
         buffer_secs: 600,
         buffer_on: true,
         ring_mb: 4096,

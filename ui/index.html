@@ -146,7 +146,7 @@ const CHEVRONS = '<svg viewBox="0 0 10 14"><path d="M2.4 5.2L5 2.6l2.6 2.6M2.4 8
 
 // Filled by the program through rewind.update(); the sample is only for opening the page in a browser.
 let S = {
-  settings: { source: { type: "primary" }, crop: null, fps: 60, codec: "hevc", quality: 24, max_mbit: 50,
+  settings: { source: { type: "primary" }, crop: null, fps: 60, codec: "hevc", quality: 20, max_mbit: 100,
     buffer_seconds: 600, buffer_memory_mb: 4096, output_dir: "", cursor: true, system_sound: true, microphone: true,
     audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8" }, notifications: true },
   monitors: [{ device: "\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
@@ -264,10 +264,10 @@ function seg(key, options, current) {
 
 function pageVideo() {
   const s = S.settings;
-  const qualities = [[20, "Высокое"], [24, "Хорошее"], [28, "Компактное"]];
+  const qualities = [[17, "Высокое"], [20, "Хорошее"], [24, "Компактное"]];
   MENUS.quality = { items: qualities.map(([v, l]) => ({ label: l, value: v })), current: s.quality, pick: (v) => set({ quality: v }) };
   if (!qualities.some(([v]) => v === s.quality)) MENUS.quality.items.push({ label: "Своё — " + s.quality, value: s.quality });
-  const rates = [20, 35, 50, 80, 120];
+  const rates = [50, 80, 100, 150, 200];
   MENUS.rate = { items: rates.map((v) => ({ label: v + " Мбит/с", value: v })), current: s.max_mbit, pick: (v) => set({ max_mbit: v }) };
   if (!rates.includes(s.max_mbit)) MENUS.rate.items.push({ label: s.max_mbit + " Мбит/с", value: s.max_mbit });
   const fps = [30, 60, 120].includes(s.fps) ? [[30, "30"], [60, "60"], [120, "120"]] : [[30, "30"], [60, "60"], [120, "120"], [s.fps, String(s.fps)]];
@@ -277,7 +277,7 @@ function pageVideo() {
     <div class="row"><div class="name">Кадров в секунду</div>${seg("fps", fps, s.fps)}</div>
     <div class="row"><div class="name">Качество</div>${popup("quality", MENUS.quality.items, s.quality)}</div>
     <div class="row"><div class="name">Предел битрейта</div>${popup("rate", MENUS.rate.items, s.max_mbit)}</div>
-    <div class="note">${about}. Видео сжимает видеокарта, на игры это почти не влияет.</div>`;
+    <div class="note">${about}. Качество держится постоянным: в простых сценах файл маленький, в сложных (трава, дождь, частицы, резкие повороты) растёт до предела битрейта. Если в таких сценах картинка рассыпается на квадраты — поднимите предел. Сжимает видеокарта, на игры это почти не влияет.</div>`;
 }
 
 function pageSound() {

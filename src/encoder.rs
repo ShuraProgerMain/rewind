@@ -178,7 +178,10 @@ impl Encoder {
             c.framerate = AVRational { num: fps as i32, den: 1 };
             c.pix_fmt = AV_PIX_FMT_D3D11;
             c.gop_size = (fps * cfg.gop_secs.max(1)) as i32;
-            c.max_b_frames = 0;
+            // Two B-frames: the same quality (PSNR and VMAF) for 18-50 % fewer bits, measured
+            // with tools\gain-bench.ps1; each B-frame costs ~45 MB of memory (cost-bench.ps1),
+            // a third one saved almost nothing more. AMD's integrated GPUs cannot do them for HEVC.
+            c.max_b_frames = if gpu.vendor == VENDOR_NVIDIA { 2 } else { 0 };
             c.bit_rate = 0;
             c.rc_max_rate = cfg.max_bitrate;
             c.rc_buffer_size = (cfg.max_bitrate * 2).min(i32::MAX as i64) as i32;
@@ -192,12 +195,16 @@ impl Encoder {
             let q = cfg.quality.to_string();
             match gpu.vendor {
                 VENDOR_NVIDIA => {
+                    // Constant quality with a high ceiling: hard scenes (grass, rain, fast
+                    // turns) get the bits they need instead of breaking into blocks, as they
+                    // do at a fixed bitrate. Preset p5, two-pass, lookahead and adaptive
+                    // quantization were measured too: no gain in PSNR or VMAF, but more
+                    // memory, NVENC load and delay, so they are left off.
                     opt(c.priv_data, "preset", "p4");
                     opt(c.priv_data, "tune", "hq");
                     opt(c.priv_data, "rc", "vbr");
                     opt(c.priv_data, "cq", &q);
                     opt(c.priv_data, "forced-idr", "1");
-                    opt(c.priv_data, "delay", "0");
                 }
                 VENDOR_AMD => {
                     opt(c.priv_data, "usage", "transcoding");
@@ -206,6 +213,20 @@ impl Encoder {
                     opt(c.priv_data, "qvbr_quality_level", &q);
                 }
                 _ => {}
+            }
+
+            // Test aid: REWIND_ENCODER_OPTS="preset=p4;bf=0;rc-lookahead=0" overrides encoder
+            // options to measure what each one costs (bf = number of B-frames).
+            if let Ok(extra) = std::env::var("REWIND_ENCODER_OPTS") {
+                for pair in extra.split(';').filter(|p| !p.trim().is_empty()) {
+                    if let Some((key, value)) = pair.split_once('=') {
+                        if key.trim() == "bf" {
+                            (*enc.ctx).max_b_frames = value.trim().parse().unwrap_or(0);
+                        } else {
+                            opt((*enc.ctx).priv_data, key.trim(), value.trim());
+                        }
+                    }
+                }
             }
 
             chk(avcodec_open2(enc.ctx, codec, null_mut()), &format!("cannot open {name}"))?;

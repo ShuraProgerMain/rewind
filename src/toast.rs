@@ -270,7 +270,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         WM_TIMER | WM_PAINT => {
-            let handled = STATE.with(|cell| match cell.try_borrow_mut() {
+            let handled = STATE.try_with(|cell| match cell.try_borrow_mut() {
                 Ok(mut slot) => match slot.as_mut() {
                     Some(s) if s.hwnd == hwnd => {
                         if msg == WM_TIMER {
@@ -283,7 +283,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     _ => false,
                 },
                 Err(_) => false,
-            });
+            })
+            .unwrap_or(false); // the process is exiting
             if handled {
                 LRESULT(0)
             } else {

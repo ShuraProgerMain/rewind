@@ -97,10 +97,15 @@ impl Muxer {
                 return Ok(());
             }
             self.started = true;
-            // The file starts at this picture: line every track up with it.
+            // The file starts at this picture. With B-frames its decode time is earlier than
+            // its display time; the video track has to start at the decode time (timestamps
+            // cannot go negative), so every track starts at that same moment, otherwise the
+            // sound would run ahead of the picture by the B-frame delay.
             let us = AVRational { num: 1, den: 1_000_000 };
+            let video_base = p.pts.min(p.dts);
+            let start_us = p.us - unsafe { av_rescale_q(p.pts - video_base, self.tracks[0].src_tb, us) };
             for (i, t) in self.tracks.iter_mut().enumerate() {
-                t.base = if i == 0 { p.pts.min(p.dts) } else { unsafe { av_rescale_q(p.us, us, t.src_tb) } };
+                t.base = if i == 0 { video_base } else { unsafe { av_rescale_q(start_us, us, t.src_tb) } };
             }
         }
         let Track { src_tb, dst_tb, base } = self.tracks[idx];

@@ -138,8 +138,10 @@ thread_local! {
 
 /// Runs `f` on the app state. Returns None if the state is busy (a nested message while
 /// another handler is still running), in which case the caller simply skips or re-posts.
+/// Also None while the process is exiting: window messages can still arrive then (the
+/// browser shutting down), after the state is gone.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut slot| slot.as_mut().map(f)))
+    APP.try_with(|cell| cell.try_borrow_mut().ok().and_then(|mut slot| slot.as_mut().map(f))).ok().flatten()
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -758,6 +760,7 @@ impl App {
     /// the message loop to unwind is not safe: a modal loop (a menu, a window being dragged,
     /// a dialog) may be holding it, and the program would hang around invisibly.
     fn quit(&mut self) -> ! {
+        self.ui = None; // close the browser window while everything is still alive
         self.stop_engine();
         let nid = self.tray_data();
         unsafe {

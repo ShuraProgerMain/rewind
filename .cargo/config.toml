@@ -1,0 +1,4 @@
+[env]
+# Both live inside the project (deps/), nothing is installed system-wide.
+LIBCLANG_PATH = { value = "deps/pyclang/Lib/site-packages/clang/native", relative = true }
+FFMPEG_DIR = { value = "deps/ffmpeg/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1", relative = true }

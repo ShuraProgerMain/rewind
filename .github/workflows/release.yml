@@ -1,0 +1,56 @@
+# Выпуск версии: поднять version в Cargo.toml, затем  git tag v0.2.0 && git push origin v0.2.0
+# Собирает программу для Windows и прикладывает файлы к черновику выпуска на GitHub.
+# Черновик никто не видит, пока его не опубликуют вручную. Запущенные копии Rewind
+# узнают о новой версии только после публикации.
+name: Выпуск
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  # Библиотеки FFmpeg, с которыми собирается и распространяется программа (LGPL, без изменений).
+  # Ветка 8.1 = avcodec-62; при переходе на другую ветку поменять FFMPEG_SET в src/updater.rs.
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Тег совпадает с версией в Cargo.toml
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:TAG) { throw "Тег $env:TAG, а в Cargo.toml версия $version" }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+
+      - name: FFmpeg
+        shell: pwsh
+        run: |
+          curl.exe -L --fail -o ffmpeg.zip $env:FFMPEG_URL
+          Expand-Archive ffmpeg.zip deps/ffmpeg
+          $dir = (Get-ChildItem deps/ffmpeg -Directory | Select-Object -First 1).FullName
+          "FFMPEG_DIR=$dir" >> $env:GITHUB_ENV
+          # libclang нужен для привязок к FFmpeg; LLVM на сборочной машине уже стоит
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Сборка и упаковка
+        shell: pwsh
+        run: ./tools/package.ps1
+
+      # Файлы выпуска: архив для первой установки, а rewind.exe с .sha256 и update.json —
+      # для обновления уже запущенных копий
+      - name: Черновик выпуска
+        shell: bash
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "Rewind ${TAG#v}" --generate-notes
+          gh release upload "$TAG" dist/release/* --clobber

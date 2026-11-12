@@ -103,7 +103,15 @@ button { font: inherit; color: inherit; cursor: default; }
 .file .acts .icon-btn { width: 28px; height: 28px; }
 .file .pill { height: 20px; padding: 0 8px; margin-left: 6px; border-radius: 10px; border: 0; font-size: 11px; color: var(--label); background: var(--track); flex: none; display: inline-flex; align-items: center; gap: 4px; }
 .file .pill svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.6; transition: transform .15s; }
-.file .pill[aria-expanded="true"] svg { transform: rotate(180deg); }
+.file .pill[aria-expanded="true"] svg.chev { transform: rotate(180deg); }
+.file .pill .st { color: var(--secondary); }
+.file .pill.ok .st { color: var(--green); }
+.file .pill.busy .st { color: var(--accent); font-variant-numeric: tabular-nums; }
+.file .pill.bad { background: color-mix(in srgb, var(--red) 18%, transparent); }
+.file .pill.bad .st { color: var(--red); }
+.marks .mstate { display: flex; align-items: center; gap: 10px; min-height: 34px; font-size: 11px; line-height: 15px; color: var(--secondary); }
+.marks .mstate.bad { color: var(--red); }
+.marks .mstate span { flex: 1; min-width: 0; }
 .file .info .title { display: flex; align-items: center; min-width: 0; font-size: inherit; line-height: inherit; color: var(--label); overflow: visible; }
 .file .info .title b { min-width: 0; }
 .marks { margin: 0 0 6px 91px; }
@@ -214,6 +222,7 @@ let S = {
     audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8", screenshot: "Ctrl+Alt+F11", marker: "Ctrl+Alt+F12", marker_note: "Ctrl+Alt+Shift+F12" },
     pad: { save_clip: "LB+RB+L3+R3", record: "", buffer: "", screenshot: "", marker: "", marker_note: "" }, notifications: true },
   pad: { learning: null, pads: null, hint: "" },
+  jobs: {},
   apps: [{ exe: "eldenring.exe", name: "ELDEN RING" }, { exe: "telegram.exe", name: "Telegram Desktop" }],
   monitors: [{ device:"\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
   windows: ["Telegram", "Obsidian"],
@@ -439,7 +448,7 @@ const ICONS = {
   rename: '<svg viewBox="0 0 16 16"><path d="M10.6 2.8l2.6 2.6-7.4 7.4H3.2v-2.6zM9 4.4l2.6 2.6"/></svg>',
   scissors: '<svg viewBox="0 0 16 16"><circle cx="4.2" cy="12" r="2.2"/><circle cx="11.8" cy="12" r="2.2"/><path d="M5.6 10.2L11.5 2M10.4 10.2L4.5 2"/></svg>',
   pause: '<svg viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
-  chevron: '<svg viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3"/></svg>',
+  chevron: '<svg class="chev" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>',
   trash: '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
 };
@@ -473,16 +482,29 @@ function markWord(n) {
   const a = n % 10, b = n % 100;
   return n + " " + (a === 1 && b !== 11 ? "метка" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "метки" : "меток");
 }
+// Where a file's markers stand: written into the video as chapters (what Resolve shows),
+// being written, waiting, failed, or not there (a file from before, or one that was open).
+function markState(f) {
+  const job = (S.jobs || {})[f.path];
+  if (job && job.state === "writing") return { kind: "busy", short: Math.round((job.done || 0) * 100) + "%", text: "Метки записываются в видео" };
+  if (job && job.state === "waiting") return { kind: "busy", short: "ждут", text: "Метки ждут записи в видео" };
+  if (job && job.state === "failed") return { kind: "bad", short: "не в видео", text: "Метки не записаны в видео: " + job.error, retry: true };
+  if ((f.chapters || 0) >= f.markers.length) return { kind: "ok", short: "✓ в видео", text: "Метки записаны в видео — при перетаскивании в Resolve они будут на клипе" };
+  return { kind: "bad", short: "не в видео", text: "Меток нет в самом видео — Resolve их не увидит", retry: true };
+}
 function markRows(f) {
   const p = esc(f.path);
-  return `<div class="marks" role="list" aria-label="Метки">` + f.markers.map((m, i) => `
+  const st = markState(f);
+  const head = st.retry ? `<div class="mstate bad"><span>${esc(st.text)}</span><button class="push small" data-op="rewrite">Записать в видео</button></div>`
+    : st.kind === "busy" ? `<div class="mstate" role="status"><span>${esc(st.text)}${st.short.endsWith("%") ? " · " + st.short : ""}. Пока не закончится, в Resolve их не будет.</span></div>` : "";
+  return `<div class="marks" data-path="${p}">` + head + `<div role="list" aria-label="Метки">` + f.markers.map((m, i) => `
     <div class="mrow" role="listitem" data-mark="${m.id}" data-path="${p}">
       <img src="frame?p=${encodeURIComponent(f.path)}&t=${m.t.toFixed(2)}&v=${f.time}" alt="" loading="lazy">
       <span class="at">${clock(m.t)}</span>
       <input data-mark-title value="${esc(m.title || "")}" placeholder="Метка ${i + 1} — без заголовка" aria-label="Заголовок метки ${i + 1}" spellcheck="false" maxlength="200">
       <button class="icon-btn" data-mop="go" aria-label="Обрезать с метки ${i + 1}" title="Открыть здесь">${ICONS.scissors}</button>
       <button class="icon-btn" data-mop="delete" aria-label="Удалить метку ${i + 1}" title="Удалить метку">${ICONS.close}</button>
-    </div>`).join("") + `</div>`;
+    </div>`).join("") + `</div></div>`;
 }
 function fileRow(f) {
   const kind = f.kind === "clip" ? "Клип" : f.kind === "rec" ? "Запись" : f.kind === "shot" ? "Скриншот" : "Видео";
@@ -496,7 +518,7 @@ function fileRow(f) {
   const head = renaming === f.path
     ? `<input data-rename="${p}" value="${esc(f.name)}" aria-label="Новое имя файла" spellcheck="false">`
     : `<span class="title"><b title="${esc(f.name)}">${esc(title)}</b>${f.markers && f.markers.length
-        ? `<button class="pill" data-op="marks" aria-expanded="${openMarks === f.path}" aria-label="Метки: ${markWord(f.markers.length)}">${markWord(f.markers.length)}${ICONS.chevron}</button>` : ""}</span>`;
+        ? (() => { const st = markState(f); return `<button class="pill ${st.kind}" data-op="marks" aria-expanded="${openMarks === f.path}" title="${esc(st.text)}" aria-label="Метки: ${markWord(f.markers.length)}, ${esc(st.text)}">${markWord(f.markers.length)} <span class="st">${esc(st.short)}</span>${ICONS.chevron}</button>`; })() : ""}</span>`;
   return `<div class="file" data-file="${p}">
       <img src="thumb?p=${encodeURIComponent(f.path)}&v=${f.time}" alt="" loading="lazy" onerror="this.outerHTML='<div class=noimg></div>'">
       <div class="info">${head}<span>${esc(detail)}</span></div>
@@ -671,7 +693,11 @@ document.addEventListener("click", (e) => {
     } else send({ t: "mark", op: "delete", path, id });
     return;
   }
-  if (t.dataset.op) { fileAction(t.dataset.op, t.closest("[data-file]").dataset.file); return; }
+  if (t.dataset.op) {
+    const owner = t.closest("[data-file], [data-path]"); // a file's row, or its markers below it
+    if (owner) fileAction(t.dataset.op, owner.dataset.file || owner.dataset.path);
+    return;
+  }
   if (t.dataset.tab) { tab = t.dataset.tab; if (tab === "files") cmd("files"); render(); }
   else if (t.dataset.toggle) set({ [t.dataset.toggle]: !S.settings[t.dataset.toggle] });
   else if (t.dataset.seg) set({ [t.dataset.seg]: JSON.parse(t.dataset.value) });
@@ -972,6 +998,10 @@ window.rewind = {
     if (r.ok) { closeTrim(); tab = "files"; render(); return; }
     if ($("tr-note")) { $("tr-note").classList.add("bad"); $("tr-note").textContent = "Не получилось: " + r.error; }
     drawTrim();
+  },
+  jobs(map) {
+    S.jobs = map;
+    if (tab === "files" && !renaming) { if ($("menu") || listening || editingMark()) stale = true; else render(); }
   },
   files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening || editingMark()) stale = true; else render(); } },
   update(state) {

@@ -18,8 +18,8 @@ use crate::ffi::*;
 
 /// Where the recordings and the preview cache are; set by the app, read by the page server.
 static PLACES: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
-/// Durations already read, by (path, modified, size).
-static DURATIONS: Mutex<Option<HashMap<(PathBuf, u64, u64), f64>>> = Mutex::new(None);
+/// Length and number of chapters already read, by (path, modified, size).
+static DURATIONS: Mutex<Option<HashMap<(PathBuf, u64, u64), (f64, usize)>>> = Mutex::new(None);
 
 const THUMB_WIDTH: usize = 256;
 
@@ -44,6 +44,8 @@ pub struct Entry {
     pub time: u64,
     pub bytes: u64,
     pub secs: f64,
+    /// Chapters inside the video (the markers as editors see them).
+    pub chapters: usize,
     /// Marked moments (from `<name>.markers.json`).
     pub markers: Vec<crate::marks::Marker>,
 }
@@ -75,14 +77,16 @@ fn stamp(meta: &std::fs::Metadata) -> u64 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Length of a video from its header (the MP4 index), without decoding anything.
-fn duration(path: &Path) -> f64 {
-    let Ok(cpath) = CString::new(path.to_string_lossy().as_bytes()) else { return 0.0 };
+/// Length of a video and how many chapters (markers) it carries, from its header (the MP4
+/// index), without decoding anything.
+fn duration(path: &Path) -> (f64, usize) {
+    let Ok(cpath) = CString::new(path.to_string_lossy().as_bytes()) else { return (0.0, 0) };
     unsafe {
         let mut fmt: *mut AVFormatContext = null_mut();
         if avformat_open_input(&mut fmt, cpath.as_ptr(), null(), null_mut()) < 0 {
-            return 0.0;
+            return (0.0, 0);
         }
+        let chapters = (*fmt).nb_chapters as usize;
         // The tracks know their length from the MP4 index; the file total is only filled in
         // by a full stream analysis, which would read data.
         let mut longest = 0f64;
@@ -94,7 +98,7 @@ fn duration(path: &Path) -> f64 {
             }
         }
         avformat_close_input(&mut fmt);
-        longest
+        (longest, chapters)
     }
 }
 
@@ -128,7 +132,7 @@ pub fn list(limit: usize) -> Vec<Entry> {
             let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let key = (path.clone(), stamp(&meta), meta.len());
             let picture = is_picture(&path);
-            let secs = if picture { 0.0 } else { *cache.entry(key).or_insert_with(|| duration(&path)) };
+            let (secs, chapters) = if picture { (0.0, 0) } else { *cache.entry(key).or_insert_with(|| duration(&path)) };
             let lower = name.to_lowercase();
             let kind = if picture {
                 "shot"
@@ -144,7 +148,7 @@ pub fn list(limit: usize) -> Vec<Entry> {
                 _ => name.split_once(" — ").map(|(_, app)| app.to_string()).unwrap_or_default(),
             };
             let markers = if picture { Vec::new() } else { crate::marks::load(&path) };
-            Entry { path: path.to_string_lossy().to_string(), name, kind, app, time: stamp(&meta), bytes: meta.len(), secs, markers }
+            Entry { path: path.to_string_lossy().to_string(), name, kind, app, time: stamp(&meta), bytes: meta.len(), secs, chapters, markers }
         })
         .collect()
 }
@@ -426,7 +430,7 @@ pub fn trim(path: &Path, start: f64, end: f64) -> Result<Trimmed> {
     let out = trimmed_name(path);
     // Markers inside the kept part come along, as chapters and in the marker file.
     let markers = crate::marks::load(path);
-    let result = unsafe { cut(path, &out, start, end, &markers) };
+    let result = unsafe { cut(path, &out, start, end, &markers, &mut |_| {}) };
     if result.is_err() {
         let _ = std::fs::remove_file(&out); // never leave half a file behind
     }
@@ -441,20 +445,22 @@ pub fn trim(path: &Path, start: f64, end: f64) -> Result<Trimmed> {
 /// title was changed or a marker removed). The video is copied into a new file without
 /// re-encoding, which then takes the old one's place and date; it fails while another
 /// program has the file open.
-pub fn rewrite_chapters(path: &Path) -> Result<()> {
+/// `progress` hears how far it is (0..1) now and then.
+pub fn rewrite_chapters(path: &Path, progress: &mut dyn FnMut(f64)) -> Result<()> {
     if !inside(path) {
         bail!("not a file in the recordings folder");
     }
     let meta = std::fs::metadata(path)?;
     let tmp = path.with_extension("rewind-tmp.mp4");
-    let result = unsafe { cut(path, &tmp, 0.0, f64::INFINITY, &crate::marks::load(path)) };
+    let result = unsafe { cut(path, &tmp, 0.0, f64::INFINITY, &crate::marks::load(path), progress) };
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        bail!("файл открыт в другой программе ({e})");
+        crate::log::line(&format!("cannot replace {}: {e}", path.display()));
+        bail!("файл открыт в другой программе. Закройте его и нажмите «Записать в видео»");
     }
     // Same date as before, so the list keeps its order.
     if let (Ok(modified), Ok(file)) = (meta.modified(), std::fs::OpenOptions::new().write(true).open(path)) {
@@ -498,7 +504,16 @@ fn keep_markers(markers: &[crate::marks::Marker], from: f64, to: f64, base: f64)
 
 /// Copies `start..end` seconds of `src` into `dst` without re-encoding. The markers that fall
 /// inside become the chapters of the new file; they are returned shifted to its timeline.
-unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64, markers: &[crate::marks::Marker]) -> Result<(f64, f64, Vec<crate::marks::Marker>)> {
+unsafe fn cut(
+    src: &Path,
+    dst: &Path,
+    start: f64,
+    end: f64,
+    markers: &[crate::marks::Marker],
+    progress: &mut dyn FnMut(f64),
+) -> Result<(f64, f64, Vec<crate::marks::Marker>)> {
+    let total_bytes = std::fs::metadata(src).map(|m| m.len().max(1)).unwrap_or(1) as f64;
+    let mut packets_read: u64 = 0;
     let csrc = CString::new(src.to_string_lossy().as_bytes())?;
     let cdst = CString::new(dst.to_string_lossy().as_bytes())?;
     let mut f = CutFiles(null_mut(), null_mut(), av_packet_alloc(), false);
@@ -552,6 +567,10 @@ unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64, markers: &[crate::ma
     while !done.iter().all(|d| *d) {
         if av_read_frame(f.0, f.2) < 0 {
             break;
+        }
+        packets_read += 1;
+        if packets_read % 256 == 0 && (*f.2).pos > 0 {
+            progress(((*f.2).pos as f64 / total_bytes).min(1.0));
         }
         let i = (*f.2).stream_index as usize;
         let ist = *(*f.0).streams.add(i);

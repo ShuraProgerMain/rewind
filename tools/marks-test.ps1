@@ -88,7 +88,7 @@ Js "document.querySelector('[data-tab=files]').click()"
 Start-Sleep 1
 Js "document.querySelector('[data-op=marks]').click()"
 & "$PSScriptRoot\ui-shot.ps1" -Out "$Data\files-marks.png" -Margin 24 | Out-Null
-Js "const f = document.querySelector('[data-mark-title]'); f.focus(); f.value = 'Typed on the page'; f.blur();"
+Js "{ const f = document.querySelector('[data-mark-title]'); f.focus(); f.value = 'Typed on the page'; f.blur(); }"
 Start-Sleep 3
 $m = @(Marks $rec)
 Check 'title edited on the page is saved' (@($m | Where-Object { $_.title -eq 'Typed on the page' }).Count -eq 1)
@@ -96,6 +96,23 @@ Check 'the video keeps its date after the rewrite' ((Get-Item -LiteralPath $rec.
 $i = Inside $rec
 Check '...and written into the video' (@($i.chapters | Where-Object { $_.tags.title -eq 'Typed on the page' }).Count -eq 1)
 Check "...without growing extra tracks ($(@($i.streams).Count) tracks)" (@($i.streams | Where-Object codec_type -eq 'data').Count -eq 1 -and @($i.streams | Where-Object codec_type -eq 'audio').Count -eq 2)
+
+# the status of the markers on the page: in the video, or not (file held by another program)
+function Pill { Js "send({t: 'log', text: 'pill: ' + document.querySelector('.pill').className + ' / ' + document.querySelector('.pill .st').textContent})"; (Select-String -Path "$Data\rewind.log" -Pattern 'pill: (.*)' | Select-Object -Last 1).Matches[0].Groups[1].Value }
+$state = Pill
+Check "status says the markers are in the video ($state)" ($state -match '\bok\b')
+$lock = [IO.File]::Open($rec.FullName, 'Open', 'Read', 'ReadWrite')   # like a player: no renaming meanwhile
+# (the window is in the background here, where focus events do not fire: commit directly)
+Js "{ const f = document.querySelector('[data-mark-title]'); f.value = 'Locked title'; commitMark(f); }"
+Start-Sleep 3
+$state = Pill
+Check "status shows the failure while the file is held ($state)" ($state -match '\bbad\b')
+Check '...with a button to try again' ((Select-String -Path "$Data\rewind.log" -Pattern 'chapters not written' -SimpleMatch).Count -ge 1)
+$lock.Close()
+Js "document.querySelector('[data-op=rewrite]').click()"
+Start-Sleep 3
+$state = Pill
+Check "after the retry the markers are in the video ($state)" ($state -match '\bok\b' -and @((Inside $rec).chapters | Where-Object { $_.tags.title -eq 'Locked title' }).Count -eq 1)
 
 # trim view shows the markers
 Js "document.querySelector('[data-mop=go]').click()"

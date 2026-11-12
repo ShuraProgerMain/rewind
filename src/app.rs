@@ -53,8 +53,29 @@ const WM_UPDATE: u32 = WM_APP + 7;
 const WM_TRIMMED: u32 = WM_APP + 9;
 /// A screenshot has been saved (or failed).
 const WM_SHOT: u32 = WM_APP + 13;
-/// Chapters were written into a video again (or that failed).
+/// News from the worker that writes chapters into videos (see `JobNote`).
 const WM_REWRITTEN: u32 = WM_APP + 15;
+
+/// What the chapter worker reports.
+enum JobNote {
+    Started(PathBuf),
+    Progress(PathBuf, f64),
+    Done(PathBuf, Result<(), String>),
+}
+
+/// Writing the markers of one video into it as chapters.
+#[derive(Clone, Debug, PartialEq)]
+enum JobState {
+    Waiting,
+    Writing(f64),
+    Failed(String),
+}
+
+struct Job {
+    state: JobState,
+    /// Say so when it is done (a recording that was just stopped: the user waits for it).
+    announce: bool,
+}
 // Buttons of the "saved" notification (ids for WM_TOAST_ACTION).
 const ACT_OPEN: usize = 1;
 const ACT_REVEAL: usize = 2;
@@ -146,7 +167,9 @@ struct App {
     mark_files: std::collections::HashMap<u64, Vec<PathBuf>>,
     /// Videos whose chapters must be written again (a background worker takes them).
     rewrite_tx: Sender<PathBuf>,
-    rewritten_rx: Receiver<(PathBuf, Result<(), String>)>,
+    rewritten_rx: Receiver<JobNote>,
+    /// Videos whose chapters are waiting, being written, or failed (shown on the page).
+    jobs: std::collections::HashMap<PathBuf, Job>,
 }
 
 /// What the settings page shows about updates.
@@ -563,7 +586,7 @@ impl App {
         let _ = self.tx.send(Cmd::MarkTitle(id, title.clone()));
         for file in self.mark_files.get(&id).cloned().unwrap_or_default() {
             match crate::marks::set_title(&file, id, &title) {
-                Ok(true) => self.rewrite_chapters(file),
+                Ok(true) => self.rewrite_chapters(file, false),
                 Ok(false) => {}
                 Err(e) => log::line(&format!("marker title not saved in {}: {e:#}", file.display())),
             }
@@ -571,21 +594,68 @@ impl App {
         self.push_files();
     }
 
-    fn rewrite_chapters(&self, file: PathBuf) {
+    /// Queues writing a video's markers into it as chapters. `announce`: notify when done.
+    fn rewrite_chapters(&mut self, file: PathBuf, announce: bool) {
         log::line(&format!("rewriting chapters of {}", file.display()));
+        let job = self.jobs.entry(file.clone()).or_insert(Job { state: JobState::Waiting, announce: false });
+        job.announce |= announce;
+        if matches!(job.state, JobState::Failed(_)) {
+            job.state = JobState::Waiting;
+        }
         let _ = self.rewrite_tx.send(file);
+        self.push_jobs();
     }
 
-    fn on_rewritten(&mut self, file: PathBuf, result: Result<(), String>) {
-        match result {
-            Ok(()) => log::line(&format!("chapters written: {}", file.display())),
-            Err(e) => {
+    fn on_job(&mut self, note: JobNote) {
+        match note {
+            JobNote::Started(file) => {
+                if let Some(job) = self.jobs.get_mut(&file) {
+                    job.state = JobState::Writing(0.0);
+                }
+            }
+            JobNote::Progress(file, done) => {
+                if let Some(job) = self.jobs.get_mut(&file) {
+                    job.state = JobState::Writing(done);
+                }
+            }
+            JobNote::Done(file, Ok(())) => {
+                log::line(&format!("chapters written: {}", file.display()));
+                let announce = self.jobs.remove(&file).is_some_and(|j| j.announce);
+                if announce && self.settings.notifications {
+                    let name = file.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    toast::show(Tone::Good, "Метки записаны в видео", &name);
+                }
+                self.push_files();
+            }
+            JobNote::Done(file, Err(e)) => {
                 log::line(&format!("chapters not written into {}: {e}", file.display()));
                 let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 self.notify(Tone::Error, "Метки не записаны в видео", &format!("{name}: {e}"));
+                if let Some(job) = self.jobs.get_mut(&file) {
+                    job.state = JobState::Failed(e);
+                }
             }
         }
-        self.push_files();
+        self.push_jobs();
+    }
+
+    /// The state of chapter writing per video, for the Records tab.
+    fn push_jobs(&self) {
+        if let Some(ui) = &self.ui {
+            let map: serde_json::Map<String, serde_json::Value> = self
+                .jobs
+                .iter()
+                .map(|(path, job)| {
+                    let v = match &job.state {
+                        JobState::Waiting => json!({ "state": "waiting" }),
+                        JobState::Writing(done) => json!({ "state": "writing", "done": done }),
+                        JobState::Failed(e) => json!({ "state": "failed", "error": e }),
+                    };
+                    (path.to_string_lossy().to_string(), v)
+                })
+                .collect();
+            ui.eval(&format!("window.rewind&&window.rewind.jobs&&window.rewind.jobs({})", serde_json::Value::Object(map)));
+        }
     }
 
     /// Writes the markers of a file that was just saved; returns how many there are.
@@ -605,7 +675,7 @@ impl App {
         }
         // A title typed just as the file was finished did not make it into its chapters.
         if list.iter().zip(marks).any(|(l, m)| l.title != m.title) {
-            self.rewrite_chapters(path.to_path_buf());
+            self.rewrite_chapters(path.to_path_buf(), false);
         }
         list.len()
     }
@@ -798,6 +868,7 @@ impl App {
         match op {
             "open" => open_path(path, None),
             "reveal" => reveal_file(path),
+            "rewrite" => self.rewrite_chapters(path.clone(), false),
             "delete" => match crate::library::recycle(&path) {
                 Ok(()) => {
                     if self.last_file.as_ref() == Some(&path) {
@@ -864,6 +935,7 @@ impl App {
             "ready" => {
                 self.ui_ready = true;
                 self.push_state();
+                self.push_jobs();
                 self.deliver_trim();
                 if let Some(ui) = &self.ui {
                     ui.show();
@@ -884,7 +956,7 @@ impl App {
                     _ => return None,
                 };
                 match result {
-                    Ok(()) => self.rewrite_chapters(path),
+                    Ok(()) => self.rewrite_chapters(path, false),
                     Err(e) => self.notify(Tone::Error, "Метка не сохранена", &format!("{e:#}")),
                 }
                 self.push_files();
@@ -1016,7 +1088,7 @@ impl App {
                 self.last_file = Some(path.clone());
                 let n = self.store_marks(&path, &marks);
                 if n > 0 {
-                    self.rewrite_chapters(path.clone()); // see engine: a recording gets them afterwards
+                    self.rewrite_chapters(path.clone(), true); // see engine: a recording gets them afterwards
                 }
                 self.notify_saved("Запись сохранена", &format!("{} · {}{}", duration_text(secs.round() as u64), size_text(bytes), marks_text(n)));
                 self.last_file = Some(path);
@@ -1433,8 +1505,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_REWRITTEN => {
             with_app(|app| {
-                while let Ok((file, result)) = app.rewritten_rx.try_recv() {
-                    app.on_rewritten(file, result);
+                while let Ok(note) = app.rewritten_rx.try_recv() {
+                    app.on_job(note);
                 }
             });
             LRESULT(0)
@@ -1666,12 +1738,23 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
                     files.push(more);
                 }
             }
-            for file in files {
-                let result = crate::library::rewrite_chapters(&file).map_err(|e| format!("{e:#}"));
-                let _ = rewritten_tx.send((file, result));
+            let tell = |note: JobNote| {
+                let _ = rewritten_tx.send(note);
                 unsafe {
                     let _ = PostMessageW(Some(HWND(owner as _)), WM_REWRITTEN, WPARAM(0), LPARAM(0));
                 }
+            };
+            for file in files {
+                tell(JobNote::Started(file.clone()));
+                let mut last = std::time::Instant::now();
+                let result = crate::library::rewrite_chapters(&file, &mut |done| {
+                    if last.elapsed() >= std::time::Duration::from_millis(250) {
+                        last = std::time::Instant::now();
+                        tell(JobNote::Progress(file.clone(), done));
+                    }
+                })
+                .map_err(|e| format!("{e:#}"));
+                tell(JobNote::Done(file, result));
             }
         }
     });
@@ -1725,6 +1808,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         mark_files: Default::default(),
         rewrite_tx,
         rewritten_rx,
+        jobs: Default::default(),
     };
     if first_run {
         app.save_settings(); // so the file exists for editing

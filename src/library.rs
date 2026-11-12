@@ -195,13 +195,15 @@ pub fn thumbnail(path: &Path) -> Result<Vec<u8>> {
     if let Ok(bytes) = std::fs::read(&cached) {
         return Ok(bytes);
     }
-    let bmp = unsafe { decode_middle(path)? };
+    let bmp = unsafe { decode_at(path, None)? };
     let _ = std::fs::create_dir_all(&cache_dir);
     let _ = std::fs::write(&cached, &bmp);
     Ok(bmp)
 }
 
-unsafe fn decode_middle(path: &Path) -> Result<Vec<u8>> {
+/// Decodes the picture at `at` seconds (from the keyframe before it, forward), or from the
+/// middle of the video when `at` is None.
+unsafe fn decode_at(path: &Path, at: Option<f64>) -> Result<Vec<u8>> {
     let cpath = CString::new(path.to_string_lossy().as_bytes())?;
     let mut fmt: *mut AVFormatContext = null_mut();
     chk(avformat_open_input(&mut fmt, cpath.as_ptr(), null(), null_mut()), "open")?;
@@ -226,11 +228,20 @@ unsafe fn decode_middle(path: &Path) -> Result<Vec<u8>> {
     (*g.1).thread_count = 2;
     chk(avcodec_open2(g.1, decoder, null_mut()), "decoder")?;
 
-    // The middle of the video, or the start if its length is unknown.
-    if (*g.0).duration > 0 {
-        let target = av_rescale_q((*g.0).duration / 2, AVRational { num: 1, den: AV_TIME_BASE as i32 }, (*stream).time_base);
+    // The asked moment, else the middle of the video (or its start if the length is unknown).
+    let tb = (*stream).time_base;
+    let wanted: Option<i64> = match at {
+        Some(t) => Some((t.max(0.0) * tb.den as f64 / tb.num as f64) as i64),
+        None if (*g.0).duration > 0 => {
+            Some(av_rescale_q((*g.0).duration / 2, AVRational { num: 1, den: AV_TIME_BASE as i32 }, tb))
+        }
+        None => None,
+    };
+    if let Some(target) = wanted {
         av_seek_frame(g.0, index, target, 1); // AVSEEK_FLAG_BACKWARD: the keyframe at or before
     }
+    // For an exact moment, decode forward from that keyframe up to the picture asked for.
+    let exact = at.map(|_| wanted.unwrap_or(0));
     let mut got = false;
     let mut flushed = false;
     while !got {
@@ -245,7 +256,11 @@ unsafe fn decode_middle(path: &Path) -> Result<Vec<u8>> {
         }
         let r = avcodec_receive_frame(g.1, g.3);
         if r >= 0 {
-            got = true;
+            let ts = (*g.3).best_effort_timestamp;
+            got = match exact {
+                Some(target) if !flushed && ts != AV_NOPTS_VALUE && ts < target => false,
+                _ => true,
+            };
         } else if r != AVERROR_EAGAIN {
             bail!("no picture could be decoded");
         }
@@ -308,6 +323,25 @@ unsafe fn to_bmp(f: &AVFrame) -> Vec<u8> {
     bmp
 }
 
+/// A piece of a video for the page's player, which asks for byte ranges while it plays and
+/// seeks. Returns the bytes and the file's total size. At most 4 MB per answer.
+pub fn read_range(path: &Path, start: u64, end: Option<u64>) -> Result<(Vec<u8>, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    if !inside(path) {
+        bail!("not a file in the recordings folder");
+    }
+    let mut file = std::fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    if start >= total {
+        bail!("range outside the file");
+    }
+    let last = end.unwrap_or(total - 1).min(total - 1).min(start + (4 << 20) - 1);
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = vec![0u8; (last - start + 1) as usize];
+    file.read_exact(&mut buf)?;
+    Ok((buf, total))
+}
+
 /// Reads a `%XX`-encoded query value (what encodeURIComponent produces).
 pub fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
@@ -327,3 +361,170 @@ pub fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+
+/// Result of a trim: the new file and the part it really covers (the start moves back to the
+/// keyframe at or before the chosen moment, because nothing is re-encoded).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Trimmed {
+    pub path: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// A free name next to `path`: "<stem> (обрезка).mp4", then "(обрезка 2)" and so on.
+fn trimmed_name(path: &Path) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let mut n = 1;
+    loop {
+        let label = if n == 1 { "(обрезка)".to_string() } else { format!("(обрезка {n})") };
+        let candidate = path.with_file_name(format!("{stem} {label}.mp4"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Copies the part from `start` to `end` seconds into a new file next to the original,
+/// without re-encoding: instant and lossless. The original stays as it is.
+pub fn trim(path: &Path, start: f64, end: f64) -> Result<Trimmed> {
+    if !inside(path) {
+        bail!("not a file in the recordings folder");
+    }
+    if end <= start {
+        bail!("the end must be after the start");
+    }
+    let out = trimmed_name(path);
+    let result = unsafe { cut(path, &out, start, end) };
+    if result.is_err() {
+        let _ = std::fs::remove_file(&out); // never leave half a file behind
+    }
+    let (s, e) = result?;
+    Ok(Trimmed { path: out.to_string_lossy().to_string(), start: s, end: e })
+}
+
+struct CutFiles(*mut AVFormatContext, *mut AVFormatContext, *mut AVPacket, bool);
+
+impl Drop for CutFiles {
+    fn drop(&mut self) {
+        unsafe {
+            av_packet_free(&mut self.2);
+            if !self.1.is_null() {
+                if self.3 {
+                    av_write_trailer(self.1);
+                }
+                if !(*self.1).pb.is_null() {
+                    avio_closep(&mut (*self.1).pb);
+                }
+                avformat_free_context(self.1);
+            }
+            avformat_close_input(&mut self.0);
+        }
+    }
+}
+
+unsafe fn seconds(st: *mut AVStream, ts: i64) -> f64 {
+    ts as f64 * (*st).time_base.num as f64 / (*st).time_base.den as f64
+}
+
+unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(f64, f64)> {
+    let csrc = CString::new(src.to_string_lossy().as_bytes())?;
+    let cdst = CString::new(dst.to_string_lossy().as_bytes())?;
+    let mut f = CutFiles(null_mut(), null_mut(), av_packet_alloc(), false);
+    chk(avformat_open_input(&mut f.0, csrc.as_ptr(), null(), null_mut()), "open")?;
+    chk(avformat_find_stream_info(f.0, null_mut()), "stream info")?;
+    chk(avformat_alloc_output_context2(&mut f.1, null(), c"mp4".as_ptr(), cdst.as_ptr()), "output")?;
+
+    let n = (*f.0).nb_streams as usize;
+    let mut video: Option<usize> = None;
+    let mut wanted = vec![false; n]; // video and sound tracks are copied, anything else is not
+    for i in 0..n {
+        let ist = *(*f.0).streams.add(i);
+        let kind = (*(*ist).codecpar).codec_type;
+        wanted[i] = kind == AVMEDIA_TYPE_VIDEO || kind == AVMEDIA_TYPE_AUDIO;
+        let ost = avformat_new_stream(f.1, null());
+        if ost.is_null() {
+            bail!("avformat_new_stream failed");
+        }
+        chk(avcodec_parameters_copy((*ost).codecpar, (*ist).codecpar), "copy parameters")?;
+        (*ost).time_base = (*ist).time_base;
+        (*ost).avg_frame_rate = (*ist).avg_frame_rate;
+        (*ost).r_frame_rate = (*ist).r_frame_rate;
+        av_dict_copy(&mut (*ost).metadata, (*ist).metadata, 0); // track names
+        (*ost).disposition = (*ist).disposition;
+        if kind == AVMEDIA_TYPE_VIDEO && video.is_none() {
+            video = Some(i);
+        }
+    }
+    let video = video.ok_or_else(|| anyhow!("the file has no video"))?;
+    chk(avio_open(&mut (*f.1).pb, cdst.as_ptr(), AVIO_FLAG_WRITE as i32), "cannot create the file")?;
+    let mut opts: *mut AVDictionary = null_mut();
+    av_dict_set(&mut opts, c"movflags".as_ptr(), c"+faststart".as_ptr(), 0);
+    let r = avformat_write_header(f.1, &mut opts);
+    av_dict_free(&mut opts);
+    chk(r, "write header")?;
+    f.3 = true;
+
+    let vst = *(*f.0).streams.add(video);
+    let target = (start.max(0.0) / seconds(vst, 1)) as i64; // in the video time base
+    av_seek_frame(f.0, video as i32, target, 1); // AVSEEK_FLAG_BACKWARD
+
+    // Every track starts at the decode time of the first video keyframe kept (as in mux.rs).
+    let mut base: Option<f64> = None;
+    let mut first_shown = 0f64;
+    let mut last_end = 0f64;
+    let mut done: Vec<bool> = wanted.iter().map(|w| !w).collect();
+    while !done.iter().all(|d| *d) {
+        if av_read_frame(f.0, f.2) < 0 {
+            break;
+        }
+        let i = (*f.2).stream_index as usize;
+        let ist = *(*f.0).streams.add(i);
+        let pts = (*f.2).pts;
+        let dts = if (*f.2).dts == AV_NOPTS_VALUE { pts } else { (*f.2).dts };
+        if base.is_none() {
+            // Wait for a video keyframe; drop anything before it.
+            if i != video || (*f.2).flags & AV_PKT_FLAG_KEY as i32 == 0 {
+                av_packet_unref(f.2);
+                continue;
+            }
+            base = Some(seconds(ist, pts.min(dts)));
+            first_shown = seconds(ist, pts);
+        }
+        let b = base.unwrap_or(0.0);
+        // Video stops by decode order (the last pictures still have what they refer to),
+        // sound by time.
+        let past = if i == video { seconds(ist, dts) > end } else { seconds(ist, pts) > end };
+        if past {
+            done[i] = true;
+        }
+        if past || done[i] || seconds(ist, pts) < b {
+            av_packet_unref(f.2); // after the end, or sound from before the start
+            continue;
+        }
+        let shift = (b / seconds(ist, 1)).round() as i64;
+        (*f.2).pts = pts - shift;
+        (*f.2).dts = dts - shift;
+        (*f.2).pos = -1;
+        if i == video {
+            last_end = last_end.max(seconds(ist, pts + (*f.2).duration));
+        }
+        let ost = *(*f.1).streams.add(i);
+        av_packet_rescale_ts(f.2, (*ist).time_base, (*ost).time_base);
+        chk(av_interleaved_write_frame(f.1, f.2), "write")?;
+    }
+    if base.is_none() {
+        bail!("nothing to keep in that range");
+    }
+    f.3 = false;
+    chk(av_write_trailer(f.1), "finish the file")?;
+    Ok((first_shown, last_end.min(end).max(first_shown)))
+}
+
+/// One picture at a given moment, for players that cannot show the video itself.
+pub fn frame_at(path: &Path, at: f64) -> Result<Vec<u8>> {
+    if !inside(path) {
+        bail!("not a file in the recordings folder");
+    }
+    unsafe { decode_at(path, Some(at)) }
+}

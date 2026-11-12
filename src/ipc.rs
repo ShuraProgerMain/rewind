@@ -69,7 +69,7 @@ pub fn serve(name: &str, on_command: impl Fn(String) + Send + 'static) -> Result
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             1,
             0,
-            512,
+            16 * 1024,
             0,
             None,
         )
@@ -84,9 +84,9 @@ pub fn serve(name: &str, on_command: impl Fn(String) + Send + 'static) -> Result
             unsafe {
                 // An error here just means the client connected before we started waiting.
                 let _ = ConnectNamedPipe(pipe.0, None);
-                let mut buf = [0u8; 512];
+                let mut buf = vec![0u8; 16 * 1024]; // test scripts ("ui <js>") can be long
                 let mut read = 0u32;
-                if ReadFile(pipe.0, Some(&mut buf), Some(&mut read), None).is_ok() && read > 0 {
+                if ReadFile(pipe.0, Some(&mut buf[..]), Some(&mut read), None).is_ok() && read > 0 {
                     // Only short plain-text commands are expected; anything else is ignored by the receiver.
                     if let Ok(text) = std::str::from_utf8(&buf[..read as usize]) {
                         on_command(text.trim().to_string());

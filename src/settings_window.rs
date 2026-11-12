@@ -216,6 +216,51 @@ impl SettingsWindow {
             let built = WebViewBuilder::new_with_web_context(&mut context)
                 .with_transparent(true)
                 .with_asynchronous_custom_protocol("rewind".into(), |_id, request, responder| {
+                    if request.uri().path() == "/media" {
+                        // The trim view's player: the video file in byte ranges, so it can seek.
+                        let query = request.uri().query().unwrap_or_default().to_string();
+                        let range = request
+                            .headers()
+                            .get("Range")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.strip_prefix("bytes="))
+                            .and_then(|v| v.split_once('-'))
+                            .map(|(a, b)| (a.parse::<u64>().unwrap_or(0), b.parse::<u64>().ok()))
+                            .unwrap_or((0, None));
+                        std::thread::spawn(move || {
+                            let file = query.split('&').find_map(|kv| kv.strip_prefix("p=")).map(crate::library::percent_decode);
+                            let piece = file.and_then(|f| crate::library::read_range(Path::new(&f), range.0, range.1).ok());
+                            let response = match piece {
+                                Some((bytes, total)) => {
+                                    let last = range.0 + bytes.len() as u64 - 1;
+                                    Response::builder()
+                                        .status(206)
+                                        .header("Content-Type", "video/mp4")
+                                        .header("Accept-Ranges", "bytes")
+                                        .header("Content-Range", format!("bytes {}-{last}/{total}", range.0))
+                                        .header("Content-Length", bytes.len().to_string())
+                                        .body(Cow::Owned(bytes))
+                                }
+                                None => Response::builder().status(416).body(Cow::Borrowed(&[][..])),
+                            };
+                            responder.respond(response.expect("response"));
+                        });
+                        return;
+                    }
+                    if request.uri().path() == "/frame" {
+                        let query = request.uri().query().unwrap_or_default().to_string();
+                        std::thread::spawn(move || {
+                            let value = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key)).map(crate::library::percent_decode);
+                            let at = value("t=").and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
+                            let picture = value("p=").and_then(|f| crate::library::frame_at(Path::new(&f), at).ok());
+                            let response = match picture {
+                                Some(bytes) => Response::builder().header("Content-Type", "image/bmp").body(Cow::Owned(bytes)),
+                                None => Response::builder().status(404).body(Cow::Borrowed(&[][..])),
+                            };
+                            responder.respond(response.expect("response"));
+                        });
+                        return;
+                    }
                     if request.uri().path() != "/thumb" {
                         responder.respond(serve(request));
                         return;

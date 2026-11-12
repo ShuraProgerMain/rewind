@@ -6,6 +6,8 @@ use std::ffi::{c_char, c_void, CStr};
 include!(concat!(env!("OUT_DIR"), "/ffmpeg.rs"));
 
 pub const AVERROR_EAGAIN: i32 = -11;
+/// "No timestamp" (a macro bindgen cannot translate).
+pub const AV_NOPTS_VALUE: i64 = i64::MIN;
 pub const AVERROR_EOF: i32 = -0x2046_4F45; // FFERRTAG('E','O','F',' ')
 
 /// libavutil/hwcontext_d3d11va.h, declared by hand so that bindgen does not have to

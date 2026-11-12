@@ -104,6 +104,27 @@ button { font: inherit; color: inherit; cursor: default; }
 .file input { width: 100%; height: 24px; padding: 0 6px; font: inherit; font-weight: 600; color: var(--label); background: var(--input); border: 1px solid var(--accent); border-radius: 5px; outline: none; }
 .empty { height: 188px; display: grid; place-items: center; color: var(--secondary); text-align: center; }
 
+/* ---------- trim view ---------- */
+#trim { display: none; padding: 0 18px; }
+body.trimming .actions, body.trimming .sep, body.trimming .tabs, body.trimming .page { display: none; }
+body.trimming #trim { display: block; }
+.stage { height: 262px; border-radius: 8px; background: #000; overflow: hidden; display: grid; place-items: center; position: relative; }
+.stage video, .stage img { max-width: 100%; max-height: 100%; display: block; }
+.stage .wait { position: absolute; color: #9c9ca1; font-size: 12px; }
+.timeline { position: relative; height: 34px; margin: 10px 8px 0; cursor: pointer; touch-action: none; }
+.timeline .bar { position: absolute; left: 0; right: 0; top: 14px; height: 6px; border-radius: 3px; background: var(--track); }
+.timeline .sel { position: absolute; top: 14px; height: 6px; background: var(--accent); }
+.timeline .playhead { position: absolute; top: 6px; width: 2px; height: 22px; margin-left: -1px; border-radius: 1px; background: var(--label); pointer-events: none; }
+.timeline .knob { position: absolute; top: 9px; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.3), 0 1px 3px rgba(0,0,0,.3); cursor: ew-resize; border: 0; padding: 0; }
+.timeline .knob:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.times { display: flex; justify-content: space-between; margin: 0 8px; font-size: 11px; line-height: 15px; color: var(--secondary); }
+.times b { color: var(--label); font-weight: 600; }
+.trimbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.trimbar .icon-btn { color: var(--label); }
+.trimnote { margin-top: 6px; font-size: 11px; line-height: 15px; color: var(--secondary); min-height: 15px; }
+.trimnote.bad { color: var(--red); }
+
 /* ---------- switch ---------- */
 .switch { width: 34px; height: 20px; border: 0; padding: 0; border-radius: 10px; background: var(--track); position: relative; flex: none; }
 .switch::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.3); }
@@ -153,6 +174,7 @@ button { font: inherit; color: inherit; cursor: default; }
 
 <div class="tabs"><div class="seg" id="tabs"></div></div>
 <div class="page" id="page"></div>
+<div id="trim" aria-label="Обрезка"></div>
 
 <script>
 "use strict";
@@ -368,6 +390,8 @@ const ICONS = {
   play: '<svg viewBox="0 0 16 16"><path d="M5 3.5v9l7.5-4.5z"/></svg>',
   folder: '<svg viewBox="0 0 16 16"><path d="M2 4.6a1.4 1.4 0 0 1 1.4-1.4h2.9l1.4 1.6h4.9a1.4 1.4 0 0 1 1.4 1.4v5.8a1.4 1.4 0 0 1-1.4 1.4H3.4A1.4 1.4 0 0 1 2 12z"/></svg>',
   rename: '<svg viewBox="0 0 16 16"><path d="M10.6 2.8l2.6 2.6-7.4 7.4H3.2v-2.6zM9 4.4l2.6 2.6"/></svg>',
+  scissors: '<svg viewBox="0 0 16 16"><circle cx="4.2" cy="12" r="2.2"/><circle cx="11.8" cy="12" r="2.2"/><path d="M5.6 10.2L11.5 2M10.4 10.2L4.5 2"/></svg>',
+  pause: '<svg viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
   trash: '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
 };
 let renaming = null; // path of the file whose name is being edited
@@ -400,7 +424,8 @@ function fileRow(f) {
   // A name Rewind gave ("2026-11-12 14-03-05 Клип") reads better as "Клип · ELDEN RING";
   // a name the user typed is shown as it is, with the program next to the time.
   const own = !/^\d{4}-\d\d-\d\d \d\d-\d\d-\d\d/.test(f.name);
-  const title = own ? f.name : (f.app ? `${kind} · ${f.app}` : kind);
+  const cut = /\(обрезка/.test(f.name) ? " (обрезка)" : ""; // made in the trim view
+  const title = own ? f.name : (f.app ? `${kind}${cut} · ${f.app}` : kind + cut);
   const detail = [own ? f.app : "", when(f.time), length(f.secs), bytes(f.bytes)].filter(Boolean).join(" · ");
   const p = esc(f.path);
   const head = renaming === f.path
@@ -412,6 +437,7 @@ function fileRow(f) {
       <div class="acts">
         <button class="icon-btn" data-op="open" aria-label="Открыть: ${esc(f.name)}" title="Открыть">${ICONS.play}</button>
         <button class="icon-btn" data-op="reveal" aria-label="Показать в папке: ${esc(f.name)}" title="Показать в папке">${ICONS.folder}</button>
+        <button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>
         <button class="icon-btn" data-op="rename" aria-label="Переименовать: ${esc(f.name)}" title="Переименовать">${ICONS.rename}</button>
         <button class="icon-btn" data-op="delete" aria-label="В корзину: ${esc(f.name)}" title="В корзину">${ICONS.trash}</button>
       </div>
@@ -606,7 +632,7 @@ function finishKey(e) {
   cmd("hotkeys_resume"); render();
 }
 document.addEventListener("keydown", (e) => {
-  if (!listening) { if (e.key === "Escape") { if ($("menu")) closeMenu(); else cmd("close"); } return; }
+  if (!listening) { if (e.key === "Escape" && !T.path) { if ($("menu")) closeMenu(); else cmd("close"); } return; }
   e.preventDefault();
   if (e.key === "Escape") { stopListening(); return; }
   if (e.key === "Backspace" && !mods(e).length) {
@@ -622,6 +648,7 @@ document.addEventListener("keyup", (e) => { if (listening && e.code === "PrintSc
 window.addEventListener("blur", () => { closeMenu(); if (listening) stopListening(); });
 
 function fileAction(op, path) {
+  if (op === "trim") { openTrim(path); return; }
   if (op === "rename") {
     renaming = path; render();
     const field = document.querySelector("[data-rename]");
@@ -651,7 +678,177 @@ document.addEventListener("dblclick", (e) => {
   if (row && !e.target.closest("button, input")) fileAction("open", row.dataset.file);
 });
 
+// ---------- trim view ----------
+// The video plays in the page (served in byte ranges). If this computer cannot play it,
+// single pictures decoded by Rewind are shown instead.
+const T = { path: null, dur: 0, a: 0, b: 0, t: 0, video: null, img: null, fallback: false, busy: false, drag: null };
+
+function clock(sec) {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return m + ":" + r.toFixed(1).padStart(4, "0");
+}
+
+function openTrim(path) {
+  const f = (S.files || []).find((x) => x.path === path);
+  T.path = path; T.dur = f && f.secs ? f.secs : 0; T.a = 0; T.b = T.dur; T.t = 0; T.fallback = false; T.busy = false;
+  closeMenu();
+  const name = f ? f.name : path.split("\\").pop().replace(/\.mp4$/i, "");
+  $("trim").innerHTML = `
+    <div class="stage" id="stage"><span class="wait">Загружаю…</span></div>
+    <div class="timeline" id="tl" role="group" aria-label="Шкала обрезки">
+      <div class="bar"></div><div class="sel" id="tl-sel"></div><div class="playhead" id="tl-head"></div>
+      <button class="knob" id="tl-a" aria-label="Начало"></button><button class="knob" id="tl-b" aria-label="Конец"></button>
+    </div>
+    <div class="times"><span id="tl-ta"></span><span id="tl-len"></span><span id="tl-tb"></span></div>
+    <div class="trimbar">
+      <button class="icon-btn" id="tr-play" aria-label="Воспроизвести" title="Пробел">${ICONS.play}</button>
+      <button class="push small" id="tr-in" title="Клавиша I">Начало здесь</button>
+      <button class="push small" id="tr-out" title="Клавиша O">Конец здесь</button>
+      <div class="spacer"></div>
+      <button class="push small" id="tr-cancel">Отмена</button>
+      <button class="push small primary" id="tr-save" title="Enter">Сохранить</button>
+    </div>
+    <div class="trimnote" id="tr-note"></div>`;
+  $("tr-note").textContent = "«" + name + "» — исходный файл останется, новый ляжет рядом. Начало встанет на ближайший ключевой кадр, до 2 с раньше.";
+  document.body.classList.add("trimming");
+
+  const v = document.createElement("video");
+  v.src = "media?p=" + encodeURIComponent(path);
+  v.preload = "auto";
+  v.setAttribute("aria-label", "Видео");
+  v.onloadedmetadata = () => {
+    if (!T.dur || Math.abs(v.duration - T.dur) > 0.5) { T.dur = v.duration; T.b = T.dur; }
+    $("stage").replaceChildren(v);
+    drawTrim();
+  };
+  v.ontimeupdate = () => { T.t = v.currentTime; if (!v.paused && T.t >= T.b) { v.pause(); } drawTrim(); };
+  v.onplay = v.onpause = () => { $("tr-play").innerHTML = v.paused ? ICONS.play : ICONS.pause; $("tr-play").setAttribute("aria-label", v.paused ? "Воспроизвести" : "Пауза"); };
+  v.onerror = () => fallbackTrim();
+  T.video = v;
+  setTimeout(() => { if (T.video === v && v.readyState === 0) fallbackTrim(); }, 4000);
+  drawTrim();
+}
+
+function fallbackTrim() {
+  if (!T.path || T.fallback) return;
+  T.fallback = true;
+  if (T.video) { T.video.removeAttribute("src"); T.video = null; }
+  T.img = document.createElement("img");
+  T.img.alt = "";
+  $("stage").replaceChildren(T.img);
+  $("tr-play").disabled = true;
+  $("tr-note").textContent = "Это видео здесь не воспроизводится, поэтому показываю отдельные кадры. Обрезка работает так же.";
+  if (!T.dur) T.dur = 1;
+  if (!T.b) T.b = T.dur;
+  seekTrim(T.t);
+}
+
+let frameTimer = 0;
+function seekTrim(t) {
+  T.t = Math.min(Math.max(0, t), T.dur || 0);
+  if (T.video) { T.video.currentTime = T.t; }
+  else if (T.img) {
+    clearTimeout(frameTimer); // ask for a picture only once the pointer settles
+    frameTimer = setTimeout(() => { T.img.src = "frame?p=" + encodeURIComponent(T.path) + "&t=" + T.t.toFixed(3); }, 80);
+  }
+  drawTrim();
+}
+
+function drawTrim() {
+  if (!T.path || !$("tl")) return;
+  const pct = (x) => (T.dur ? (x / T.dur) * 100 : 0) + "%";
+  $("tl-a").style.left = pct(T.a);
+  $("tl-b").style.left = pct(T.b);
+  $("tl-sel").style.left = pct(T.a);
+  $("tl-sel").style.width = T.dur ? ((T.b - T.a) / T.dur) * 100 + "%" : "0";
+  $("tl-head").style.left = pct(T.t);
+  $("tl-ta").textContent = "Начало " + clock(T.a);
+  $("tl-tb").textContent = "Конец " + clock(T.b);
+  $("tl-len").innerHTML = "Длина <b>" + clock(T.b - T.a) + "</b>";
+  $("tl-a").setAttribute("aria-valuetext", clock(T.a));
+  $("tl-b").setAttribute("aria-valuetext", clock(T.b));
+  $("tr-save").disabled = T.busy || T.b - T.a < 0.5;
+}
+
+function closeTrim() {
+  if (T.video) { T.video.pause(); T.video.removeAttribute("src"); T.video.load(); }
+  T.path = null; T.video = null; T.img = null;
+  $("trim").innerHTML = "";
+  document.body.classList.remove("trimming");
+  render();
+}
+
+function setPoint(which) {
+  if (which === "a") T.a = Math.min(T.t, T.b - 0.5);
+  else T.b = Math.max(T.t, T.a + 0.5);
+  T.a = Math.max(0, T.a); T.b = Math.min(T.dur, T.b);
+  drawTrim();
+}
+
+function saveTrim() {
+  if (T.busy || T.b - T.a < 0.5) return;
+  T.busy = true;
+  $("tr-note").classList.remove("bad");
+  $("tr-note").textContent = "Сохраняю…";
+  drawTrim();
+  send({ t: "trim", path: T.path, start: T.a, end: T.b });
+}
+
+function timeAt(clientX) {
+  const r = $("tl").getBoundingClientRect();
+  return Math.min(1, Math.max(0, (clientX - r.left) / r.width)) * (T.dur || 0);
+}
+document.addEventListener("pointerdown", (e) => {
+  if (!T.path || !e.target.closest || !e.target.closest("#tl")) return;
+  e.preventDefault();
+  T.drag = e.target.id === "tl-a" ? "a" : e.target.id === "tl-b" ? "b" : "t";
+  if (T.video && !T.video.paused) T.video.pause();
+  const move = (ev) => {
+    const t = timeAt(ev.clientX);
+    if (T.drag === "a") T.a = Math.min(t, T.b - 0.5);
+    else if (T.drag === "b") T.b = Math.max(t, T.a + 0.5);
+    seekTrim(t);
+  };
+  move(e);
+  const up = () => { T.drag = null; document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+});
+document.addEventListener("click", (e) => {
+  if (!T.path) return;
+  const id = e.target.closest && e.target.closest("button") && e.target.closest("button").id;
+  if (id === "tr-play" && T.video) { if (T.video.paused) { if (T.t >= T.b - 0.05) seekTrim(T.a); T.video.play(); } else T.video.pause(); }
+  else if (id === "tr-in") setPoint("a");
+  else if (id === "tr-out") setPoint("b");
+  else if (id === "tr-cancel") closeTrim();
+  else if (id === "tr-save") saveTrim();
+  else if (id === "tl-a") seekTrim(T.a);
+  else if (id === "tl-b") seekTrim(T.b);
+}, true);
+document.addEventListener("keydown", (e) => {
+  if (!T.path || listening) return;
+  const step = e.shiftKey ? 1 / 60 : 1;
+  const handled = {
+    " ": () => $("tr-play").click(),
+    ArrowLeft: () => seekTrim(T.t - step),
+    ArrowRight: () => seekTrim(T.t + step),
+    Home: () => seekTrim(T.a),
+    End: () => seekTrim(T.b),
+    Enter: () => saveTrim(),
+    Escape: () => closeTrim(),
+  }[e.key] || ({ KeyI: () => setPoint("a"), BracketLeft: () => setPoint("a"), KeyO: () => setPoint("b"), BracketRight: () => setPoint("b") })[e.code];
+  if (handled) { e.preventDefault(); e.stopImmediatePropagation(); handled(); }
+}, true);
+
 window.rewind = {
+  trim(path) { tab = "files"; if (!S.files) cmd("files"); render(); openTrim(path); },
+  trimmed(r) {
+    T.busy = false;
+    if (r.ok) { closeTrim(); tab = "files"; render(); return; }
+    if ($("tr-note")) { $("tr-note").classList.add("bad"); $("tr-note").textContent = "Не получилось: " + r.error; }
+    drawTrim();
+  },
   files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening) stale = true; else render(); } },
   update(state) {
     Object.assign(S, state);

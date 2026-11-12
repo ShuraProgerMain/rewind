@@ -123,6 +123,18 @@ fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
                 }
                 return Ok(None);
             }
+            "--trim" => {
+                // Test aid: cut FILE from START to END seconds, as the trim view does.
+                let file = PathBuf::from(val()?);
+                let start: f64 = val()?.parse().context("--trim start")?;
+                let end: f64 = val()?.parse().context("--trim end")?;
+                let root = file.parent().and_then(|p| p.parent()).unwrap_or(&file).to_path_buf();
+                crate::library::configure(root, std::env::temp_dir().join("rewind-probe-thumbs"));
+                let t = std::time::Instant::now();
+                let done = crate::library::trim(&file, start, end)?;
+                println!("trimmed to {} ({:.2}..{:.2} s) in {} ms", done.path, done.start, done.end, t.elapsed().as_millis());
+                return Ok(None);
+            }
             "--make-ico" => {
                 icons::write_ico(&PathBuf::from(val()?))?;
                 return Ok(None);

@@ -48,6 +48,12 @@ const WM_IPC: u32 = WM_APP + 3;
 const WM_UI: u32 = WM_APP + 4;
 /// An update check has finished.
 const WM_UPDATE: u32 = WM_APP + 7;
+/// A trim has finished.
+const WM_TRIMMED: u32 = WM_APP + 9;
+// Buttons of the "saved" notification (ids for WM_TOAST_ACTION).
+const ACT_OPEN: usize = 1;
+const ACT_REVEAL: usize = 2;
+const ACT_TRIM: usize = 3;
 const TIMER_UPDATE: usize = 1;
 const FIRST_CHECK_MS: u32 = 30_000;
 const DAY_MS: u32 = 24 * 60 * 60 * 1000;
@@ -109,6 +115,10 @@ struct App {
     update: UpdateState,
     update_tx: Sender<(bool, Result<Outcome, String>)>,
     update_rx: Receiver<(bool, Result<Outcome, String>)>,
+    /// A file to open in the trim view as soon as the settings page is ready.
+    pending_trim: Option<PathBuf>,
+    trim_tx: Sender<Result<crate::library::Trimmed, String>>,
+    trim_rx: Receiver<Result<crate::library::Trimmed, String>>,
 }
 
 /// What the settings page shows about updates.
@@ -174,6 +184,84 @@ impl App {
     fn notify(&self, tone: Tone, title: &str, detail: &str) {
         if self.settings.notifications || tone == Tone::Error {
             toast::show(tone, title, detail);
+        }
+    }
+
+    /// "Saved" notification with buttons that act on the file just made.
+    fn notify_saved(&self, title: &str, detail: &str) {
+        if self.settings.notifications {
+            let actions = [("Открыть", ACT_OPEN), ("В папке", ACT_REVEAL), ("Обрезать", ACT_TRIM)];
+            toast::show_with(Tone::Good, title, detail, &actions);
+        }
+    }
+
+    /// Opens the trim view for a file (opening the settings window first if needed).
+    fn want_trim(&mut self, path: PathBuf) {
+        self.pending_trim = Some(path);
+    }
+
+    /// Hands a pending trim to the page once it can take it.
+    fn deliver_trim(&mut self) {
+        if !self.ui_ready {
+            return;
+        }
+        if let (Some(ui), Some(path)) = (&self.ui, self.pending_trim.take()) {
+            let arg = serde_json::to_string(&path.to_string_lossy()).unwrap_or_default();
+            ui.eval(&format!("window.rewind&&window.rewind.trim({arg})"));
+            ui.show();
+        }
+    }
+
+    /// Cuts a file on a worker thread; the result comes back as WM_TRIMMED.
+    fn start_trim(&self, path: PathBuf, start: f64, end: f64) {
+        if !crate::library::inside(&path) {
+            log::line(&format!("refused to trim a file outside the recordings folder: {}", path.display()));
+            return;
+        }
+        let (tx, target) = (self.trim_tx.clone(), self.hwnd.0 as isize);
+        thread::spawn(move || {
+            let result = crate::library::trim(&path, start, end).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(result);
+            unsafe {
+                let _ = PostMessageW(Some(HWND(target as _)), WM_TRIMMED, WPARAM(0), LPARAM(0));
+            }
+        });
+    }
+
+    fn on_trimmed(&mut self, result: Result<crate::library::Trimmed, String>) {
+        match &result {
+            Ok(done) => {
+                let secs = (done.end - done.start).max(0.0);
+                log::line(&format!("trimmed: {} ({:.2}..{:.2} s)", done.path, done.start, done.end));
+                self.last_file = Some(PathBuf::from(&done.path));
+                if self.settings.notifications {
+                    let actions = [("Открыть", ACT_OPEN), ("В папке", ACT_REVEAL)];
+                    toast::show_with(Tone::Good, "Обрезанный клип сохранён", &format!("{} · рядом с исходным", duration_text(secs.round() as u64)), &actions);
+                }
+            }
+            Err(e) => {
+                log::line(&format!("trim failed: {e}"));
+                self.notify(Tone::Error, "Не удалось обрезать", e);
+            }
+        }
+        if let Some(ui) = &self.ui {
+            let answer = match &result {
+                Ok(done) => serde_json::json!({ "ok": true, "path": done.path, "start": done.start, "end": done.end }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            };
+            ui.eval(&format!("window.rewind&&window.rewind.trimmed({answer})"));
+        }
+        self.push_files();
+    }
+
+    /// A button on the "saved" notification was pressed.
+    fn on_toast_action(&mut self, id: usize) {
+        let Some(file) = self.last_file.clone() else { return };
+        match id {
+            ACT_OPEN => open_path(file, None),
+            ACT_REVEAL => reveal_file(file),
+            ACT_TRIM => self.want_trim(file),
+            _ => {}
         }
     }
 
@@ -536,11 +624,17 @@ impl App {
             "ready" => {
                 self.ui_ready = true;
                 self.push_state();
+                self.deliver_trim();
                 if let Some(ui) = &self.ui {
                     ui.show();
                 }
             }
             "set" => self.merge_settings(&msg["settings"]),
+            "trim" => {
+                let path = PathBuf::from(msg["path"].as_str().unwrap_or_default());
+                let (start, end) = (msg["start"].as_f64().unwrap_or(0.0), msg["end"].as_f64().unwrap_or(0.0));
+                self.start_trim(path, start, end);
+            }
             "file" => {
                 let field = |k: &str| msg[k].as_str().unwrap_or_default().to_string();
                 self.on_file(&field("op"), &field("path"), &field("name"));
@@ -657,20 +751,14 @@ impl App {
             Event::RecordingSaved { path, secs, bytes } => {
                 self.recording = false;
                 log::line(&format!("recording saved: {} ({secs:.1} s, {bytes} bytes)", path.display()));
-                self.notify(
-                    Tone::Good,
-                    "Запись сохранена",
-                    &format!("{} · {}", duration_text(secs.round() as u64), size_text(bytes)),
-                );
+                self.last_file = Some(path.clone());
+                self.notify_saved("Запись сохранена", &format!("{} · {}", duration_text(secs.round() as u64), size_text(bytes)));
                 self.last_file = Some(path);
             }
             Event::ClipSaved { path, secs, bytes, ms } => {
                 log::line(&format!("clip saved: {} ({secs:.1} s, {bytes} bytes, {ms} ms)", path.display()));
-                self.notify(
-                    Tone::Good,
-                    "Клип сохранён",
-                    &format!("Последние {} · {}", duration_text(secs.round() as u64), size_text(bytes)),
-                );
+                self.last_file = Some(path.clone());
+                self.notify_saved("Клип сохранён", &format!("Последние {} · {}", duration_text(secs.round() as u64), size_text(bytes)));
                 self.last_file = Some(path);
             }
             Event::NothingToSave => {
@@ -1006,6 +1094,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             drain_ui(hwnd);
             LRESULT(0)
         }
+        toast::WM_TOAST_ACTION => {
+            let trim = with_app(|app| {
+                app.on_toast_action(wparam.0);
+                app.pending_trim.is_some()
+            })
+            .unwrap_or(false);
+            if trim {
+                open_settings(); // the trim view lives in the settings window
+                with_app(|app| app.deliver_trim());
+            }
+            LRESULT(0)
+        }
+        WM_TRIMMED => {
+            with_app(|app| {
+                while let Ok(result) = app.trim_rx.try_recv() {
+                    app.on_trimmed(result);
+                }
+            });
+            LRESULT(0)
+        }
         WM_UI_CLOSE => {
             with_app(|app| app.close_settings());
             LRESULT(0)
@@ -1201,6 +1309,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
 
     let (ui_tx, ui_rx) = channel::<String>();
     let (update_tx, update_rx) = channel();
+    let (trim_tx, trim_rx) = channel();
     let waiting = updater::staged(&exe);
     let mut app = App {
         hwnd,
@@ -1235,6 +1344,9 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         },
         update_tx,
         update_rx,
+        pending_trim: None,
+        trim_tx,
+        trim_rx,
     };
     if first_run {
         app.save_settings(); // so the file exists for editing
@@ -1275,6 +1387,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         log::line(&format!("hotkeys taken by another program: {}", taken.join(", ")));
         app.notify(Tone::Error, "Клавиша занята другой программой", &taken.join(", "));
     }
+    toast::set_owner(hwnd);
     APP.with(|cell| *cell.borrow_mut() = Some(app));
     if first_run && !background {
         open_settings(); // the very first launch: show that the program is here and what it does

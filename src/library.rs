@@ -424,21 +424,43 @@ pub fn trim(path: &Path, start: f64, end: f64) -> Result<Trimmed> {
         bail!("the end must be after the start");
     }
     let out = trimmed_name(path);
-    let result = unsafe { cut(path, &out, start, end) };
+    // Markers inside the kept part come along, as chapters and in the marker file.
+    let markers = crate::marks::load(path);
+    let result = unsafe { cut(path, &out, start, end, &markers) };
     if result.is_err() {
         let _ = std::fs::remove_file(&out); // never leave half a file behind
     }
-    let (s, e) = result?;
-    // Markers inside the kept part come along, shifted to the new start.
-    let kept: Vec<crate::marks::Marker> = crate::marks::load(path)
-        .into_iter()
-        .filter(|m| m.t >= s - 0.001 && m.t <= e + 0.001)
-        .map(|m| crate::marks::Marker { t: (m.t - s).max(0.0), ..m })
-        .collect();
+    let (s, e, kept) = result?;
     if let Err(e) = crate::marks::save(&out, &kept) {
         crate::log::line(&format!("markers not copied to the trimmed file: {e:#}"));
     }
     Ok(Trimmed { path: out.to_string_lossy().to_string(), start: s, end: e })
+}
+
+/// Writes the markers of `<name>.markers.json` into the video as chapters again (after a
+/// title was changed or a marker removed). The video is copied into a new file without
+/// re-encoding, which then takes the old one's place and date; it fails while another
+/// program has the file open.
+pub fn rewrite_chapters(path: &Path) -> Result<()> {
+    if !inside(path) {
+        bail!("not a file in the recordings folder");
+    }
+    let meta = std::fs::metadata(path)?;
+    let tmp = path.with_extension("rewind-tmp.mp4");
+    let result = unsafe { cut(path, &tmp, 0.0, f64::INFINITY, &crate::marks::load(path)) };
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        bail!("файл открыт в другой программе ({e})");
+    }
+    // Same date as before, so the list keeps its order.
+    if let (Ok(modified), Ok(file)) = (meta.modified(), std::fs::OpenOptions::new().write(true).open(path)) {
+        let _ = file.set_modified(modified);
+    }
+    Ok(())
 }
 
 struct CutFiles(*mut AVFormatContext, *mut AVFormatContext, *mut AVPacket, bool);
@@ -465,7 +487,18 @@ unsafe fn seconds(st: *mut AVStream, ts: i64) -> f64 {
     ts as f64 * (*st).time_base.num as f64 / (*st).time_base.den as f64
 }
 
-unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(f64, f64)> {
+/// The markers between `from` and `to` (source seconds), moved to a copy whose zero is `base`.
+fn keep_markers(markers: &[crate::marks::Marker], from: f64, to: f64, base: f64) -> Vec<crate::marks::Marker> {
+    markers
+        .iter()
+        .filter(|m| m.t >= from - 0.001 && m.t <= to + 0.001)
+        .map(|m| crate::marks::Marker { t: (m.t - base).max(0.0), ..m.clone() })
+        .collect()
+}
+
+/// Copies `start..end` seconds of `src` into `dst` without re-encoding. The markers that fall
+/// inside become the chapters of the new file; they are returned shifted to its timeline.
+unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64, markers: &[crate::marks::Marker]) -> Result<(f64, f64, Vec<crate::marks::Marker>)> {
     let csrc = CString::new(src.to_string_lossy().as_bytes())?;
     let cdst = CString::new(dst.to_string_lossy().as_bytes())?;
     let mut f = CutFiles(null_mut(), null_mut(), av_packet_alloc(), false);
@@ -475,11 +508,19 @@ unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(f64, f64)
 
     let n = (*f.0).nb_streams as usize;
     let mut video: Option<usize> = None;
-    let mut wanted = vec![false; n]; // video and sound tracks are copied, anything else is not
+    // Video and sound tracks are copied; anything else (such as the old chapter track) is not.
+    let mut wanted = vec![false; n];
+    let mut out_index = vec![0usize; n];
+    let mut made = 0;
     for i in 0..n {
         let ist = *(*f.0).streams.add(i);
         let kind = (*(*ist).codecpar).codec_type;
         wanted[i] = kind == AVMEDIA_TYPE_VIDEO || kind == AVMEDIA_TYPE_AUDIO;
+        if !wanted[i] {
+            continue;
+        }
+        out_index[i] = made;
+        made += 1;
         let ost = avformat_new_stream(f.1, null());
         if ost.is_null() {
             bail!("avformat_new_stream failed");
@@ -496,14 +537,10 @@ unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(f64, f64)
     }
     let video = video.ok_or_else(|| anyhow!("the file has no video"))?;
     chk(avio_open(&mut (*f.1).pb, cdst.as_ptr(), AVIO_FLAG_WRITE as i32), "cannot create the file")?;
-    let mut opts: *mut AVDictionary = null_mut();
-    av_dict_set(&mut opts, c"movflags".as_ptr(), c"+faststart".as_ptr(), 0);
-    let r = avformat_write_header(f.1, &mut opts);
-    av_dict_free(&mut opts);
-    chk(r, "write header")?;
-    f.3 = true;
-
     let vst = *(*f.0).streams.add(video);
+    // Where the copy will end, for the last chapter (the header comes before the packets).
+    let src_end = if (*vst).duration > 0 { seconds(vst, (*vst).duration) } else { f64::INFINITY };
+    let planned_end = end.min(src_end);
     let target = (start.max(0.0) / seconds(vst, 1)) as i64; // in the video time base
     av_seek_frame(f.0, video as i32, target, 1); // AVSEEK_FLAG_BACKWARD
 
@@ -528,6 +565,19 @@ unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(f64, f64)
             }
             base = Some(seconds(ist, pts.min(dts)));
             first_shown = seconds(ist, pts);
+            // Now the start of the copy is known: its chapters, then its header.
+            let b = pts.min(dts);
+            let b = seconds(ist, b);
+            let kept = keep_markers(markers, first_shown, planned_end, b);
+            if !kept.is_empty() {
+                crate::mux::set_chapters(f.1, &crate::marks::chapters(&kept, planned_end - b))?;
+            }
+            let mut opts: *mut AVDictionary = null_mut();
+            av_dict_set(&mut opts, c"movflags".as_ptr(), c"+faststart".as_ptr(), 0);
+            let r = avformat_write_header(f.1, &mut opts);
+            av_dict_free(&mut opts);
+            chk(r, "write header")?;
+            f.3 = true;
         }
         let b = base.unwrap_or(0.0);
         // Video stops by decode order (the last pictures still have what they refer to),
@@ -547,16 +597,21 @@ unsafe fn cut(src: &Path, dst: &Path, start: f64, end: f64) -> Result<(f64, f64)
         if i == video {
             last_end = last_end.max(seconds(ist, pts + (*f.2).duration));
         }
-        let ost = *(*f.1).streams.add(i);
+        let ost = *(*f.1).streams.add(out_index[i]);
+        (*f.2).stream_index = out_index[i] as i32;
         av_packet_rescale_ts(f.2, (*ist).time_base, (*ost).time_base);
         chk(av_interleaved_write_frame(f.1, f.2), "write")?;
     }
     if base.is_none() {
         bail!("nothing to keep in that range");
     }
+    // Zero in the new file is the decode time of its first picture (`base`).
+    let b = base.unwrap_or(0.0);
+    let last = last_end.min(end).max(first_shown);
+    let kept = keep_markers(markers, first_shown, last, b);
     f.3 = false;
     chk(av_write_trailer(f.1), "finish the file")?;
-    Ok((first_shown, last_end.min(end).max(first_shown)))
+    Ok((first_shown, last, kept))
 }
 
 /// One picture at a given moment, for players that cannot show the video itself.

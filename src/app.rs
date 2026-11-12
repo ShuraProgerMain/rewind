@@ -53,8 +53,8 @@ const WM_UPDATE: u32 = WM_APP + 7;
 const WM_TRIMMED: u32 = WM_APP + 9;
 /// A screenshot has been saved (or failed).
 const WM_SHOT: u32 = WM_APP + 13;
-/// Sending a video to DaVinci Resolve has finished.
-const WM_RESOLVED: u32 = WM_APP + 15;
+/// Chapters were written into a video again (or that failed).
+const WM_REWRITTEN: u32 = WM_APP + 15;
 // Buttons of the "saved" notification (ids for WM_TOAST_ACTION).
 const ACT_OPEN: usize = 1;
 const ACT_REVEAL: usize = 2;
@@ -144,9 +144,9 @@ struct App {
     mark_note: Option<u64>,
     mark_titles: std::collections::HashMap<u64, String>,
     mark_files: std::collections::HashMap<u64, Vec<PathBuf>>,
-    resolve_tx: Sender<Result<String, String>>,
-    resolve_rx: Receiver<Result<String, String>>,
-    resolve_busy: bool,
+    /// Videos whose chapters must be written again (a background worker takes them).
+    rewrite_tx: Sender<PathBuf>,
+    rewritten_rx: Receiver<(PathBuf, Result<(), String>)>,
 }
 
 /// What the settings page shows about updates.
@@ -555,12 +555,34 @@ impl App {
         }
     }
 
-    /// A marker's title was typed in the box (or later on the page).
+    /// A marker's title was typed in the box. Files still being written get it from the
+    /// engine; files already saved get it in their marker file and, rewritten, in the video.
     fn set_mark_title(&mut self, id: u64, title: &str) {
-        self.mark_titles.insert(id, title.to_string());
+        let title = crate::marks::clean_title(title);
+        self.mark_titles.insert(id, title.clone());
+        let _ = self.tx.send(Cmd::MarkTitle(id, title.clone()));
         for file in self.mark_files.get(&id).cloned().unwrap_or_default() {
-            if let Err(e) = crate::marks::set_title(&file, id, title) {
-                log::line(&format!("marker title not saved in {}: {e:#}", file.display()));
+            match crate::marks::set_title(&file, id, &title) {
+                Ok(true) => self.rewrite_chapters(file),
+                Ok(false) => {}
+                Err(e) => log::line(&format!("marker title not saved in {}: {e:#}", file.display())),
+            }
+        }
+        self.push_files();
+    }
+
+    fn rewrite_chapters(&self, file: PathBuf) {
+        log::line(&format!("rewriting chapters of {}", file.display()));
+        let _ = self.rewrite_tx.send(file);
+    }
+
+    fn on_rewritten(&mut self, file: PathBuf, result: Result<(), String>) {
+        match result {
+            Ok(()) => log::line(&format!("chapters written: {}", file.display())),
+            Err(e) => {
+                log::line(&format!("chapters not written into {}: {e}", file.display()));
+                let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                self.notify(Tone::Error, "Метки не записаны в видео", &format!("{name}: {e}"));
             }
         }
         self.push_files();
@@ -581,37 +603,11 @@ impl App {
         if let Err(e) = crate::marks::save(path, &list) {
             log::line(&format!("markers not saved for {}: {e:#}", path.display()));
         }
+        // A title typed just as the file was finished did not make it into its chapters.
+        if list.iter().zip(marks).any(|(l, m)| l.title != m.title) {
+            self.rewrite_chapters(path.to_path_buf());
+        }
         list.len()
-    }
-
-    /// Sends a video to DaVinci Resolve on a worker thread; the result comes back as WM_RESOLVED.
-    fn send_to_resolve(&mut self, path: PathBuf) {
-        if self.resolve_busy {
-            return;
-        }
-        self.resolve_busy = true;
-        let (tx, target) = (self.resolve_tx.clone(), self.hwnd.0 as isize);
-        thread::spawn(move || {
-            let result = crate::resolve::send(&path).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(result);
-            unsafe {
-                let _ = PostMessageW(Some(HWND(target as _)), WM_RESOLVED, WPARAM(0), LPARAM(0));
-            }
-        });
-    }
-
-    fn on_resolved(&mut self, result: Result<String, String>) {
-        self.resolve_busy = false;
-        match result {
-            Ok(name) => toast::show(Tone::Good, "Добавлено в Resolve", &format!("Таймлайн «{name}» в папке Rewind")),
-            Err(e) => {
-                log::line(&format!("resolve failed: {e}"));
-                toast::show(Tone::Error, "Не удалось отправить в Resolve", &e);
-            }
-        }
-        if let Some(ui) = &self.ui {
-            ui.eval("window.rewind&&window.rewind.resolved&&window.rewind.resolved()");
-        }
     }
 
     fn save_settings(&mut self) {
@@ -811,7 +807,6 @@ impl App {
                 }
                 Err(e) => self.notify(Tone::Error, "Не удалось удалить", &format!("{e:#}")),
             },
-            "resolve" => self.send_to_resolve(path.clone()),
             "rename" => match crate::library::rename(&path, name) {
                 Ok(new) => {
                     // Titles typed later must reach the file under its new name.
@@ -886,10 +881,11 @@ impl App {
                 let result = match msg["op"].as_str().unwrap_or_default() {
                     "title" => crate::marks::set_title(&path, id, msg["title"].as_str().unwrap_or_default()).map(|_| ()),
                     "delete" => crate::marks::remove(&path, id),
-                    _ => Ok(()),
+                    _ => return None,
                 };
-                if let Err(e) = result {
-                    self.notify(Tone::Error, "Метка не сохранена", &format!("{e:#}"));
+                match result {
+                    Ok(()) => self.rewrite_chapters(path),
+                    Err(e) => self.notify(Tone::Error, "Метка не сохранена", &format!("{e:#}")),
                 }
                 self.push_files();
             }
@@ -1019,6 +1015,9 @@ impl App {
                 log::line(&format!("recording saved: {} ({secs:.1} s, {bytes} bytes, {} marks)", path.display(), marks.len()));
                 self.last_file = Some(path.clone());
                 let n = self.store_marks(&path, &marks);
+                if n > 0 {
+                    self.rewrite_chapters(path.clone()); // see engine: a recording gets them afterwards
+                }
                 self.notify_saved("Запись сохранена", &format!("{} · {}{}", duration_text(secs.round() as u64), size_text(bytes), marks_text(n)));
                 self.last_file = Some(path);
             }
@@ -1432,10 +1431,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        WM_RESOLVED => {
+        WM_REWRITTEN => {
             with_app(|app| {
-                while let Ok(result) = app.resolve_rx.try_recv() {
-                    app.on_resolved(result);
+                while let Ok((file, result)) = app.rewritten_rx.try_recv() {
+                    app.on_rewritten(file, result);
                 }
             });
             LRESULT(0)
@@ -1653,7 +1652,29 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
     let (update_tx, update_rx) = channel();
     let (trim_tx, trim_rx) = channel();
     let (shot_tx, shot_rx) = channel();
-    let (resolve_tx, resolve_rx) = channel();
+    // One worker writes chapters into videos again, one file at a time, always from the
+    // marker file as it is by then (so several quick edits cost one rewrite).
+    let (rewrite_tx, rewrite_rx) = channel::<PathBuf>();
+    let (rewritten_tx, rewritten_rx) = channel();
+    let owner = hwnd.0 as isize;
+    thread::spawn(move || {
+        while let Ok(first) = rewrite_rx.recv() {
+            thread::sleep(std::time::Duration::from_millis(400)); // let a burst of edits arrive
+            let mut files = vec![first];
+            for more in rewrite_rx.try_iter() {
+                if !files.contains(&more) {
+                    files.push(more);
+                }
+            }
+            for file in files {
+                let result = crate::library::rewrite_chapters(&file).map_err(|e| format!("{e:#}"));
+                let _ = rewritten_tx.send((file, result));
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(owner as _)), WM_REWRITTEN, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+    });
     let waiting = updater::staged(&exe);
     let mut app = App {
         hwnd,
@@ -1702,9 +1723,8 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         mark_note: None,
         mark_titles: Default::default(),
         mark_files: Default::default(),
-        resolve_tx,
-        resolve_rx,
-        resolve_busy: false,
+        rewrite_tx,
+        rewritten_rx,
     };
     if first_run {
         app.save_settings(); // so the file exists for editing

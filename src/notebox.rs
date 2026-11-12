@@ -338,6 +338,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && is_open() {
                 let opened = STATE.with(|cell| cell.borrow().as_ref().map_or(0, |s| s.opened_at));
                 let age = windows::Win32::System::SystemInformation::GetTickCount64().saturating_sub(opened);
+                // Test scripts start a process per command, which takes the focus: with
+                // REWIND_DEBUG the box waits for Enter/Esc (or the test hook) instead.
+                if std::env::var_os("REWIND_DEBUG").is_some() {
+                    return LRESULT(0);
+                }
                 if age < 600 {
                     // Windows is still shuffling focus after the box appeared: take it back.
                     let edit = STATE.with(|cell| cell.borrow().as_ref().map(|s| s.edit));

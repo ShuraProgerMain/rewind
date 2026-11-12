@@ -1,6 +1,6 @@
 //! Writes encoded packets of all tracks into an MP4 file. No re-encoding happens here.
 
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
@@ -9,6 +9,51 @@ use anyhow::{bail, Result};
 
 use crate::encoder::{Pkt, StreamInfo};
 use crate::ffi::*;
+
+/// A chapter of the file: editors such as DaVinci Resolve show each one as a marker on the
+/// clip when the file is imported.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chapter {
+    pub start: f64,
+    pub end: f64,
+    pub title: String,
+}
+
+/// Sets the chapters of an output file. They must be set before its header is written: the
+/// MP4 writer puts the chapter texts into the file then (that copy is what DaVinci Resolve
+/// reads; the "chpl" list it writes at the end is not enough).
+pub unsafe fn set_chapters(oc: *mut AVFormatContext, list: &[Chapter]) -> Result<()> {
+    for i in 0..(*oc).nb_chapters as usize {
+        let c = *(*oc).chapters.add(i);
+        av_dict_free(&mut (*c).metadata);
+        av_free(c as *mut c_void);
+    }
+    av_freep(&mut (*oc).chapters as *mut *mut *mut AVChapter as *mut c_void);
+    (*oc).nb_chapters = 0;
+    if list.is_empty() {
+        return Ok(());
+    }
+    let array = av_mallocz(list.len() * std::mem::size_of::<*mut AVChapter>()) as *mut *mut AVChapter;
+    if array.is_null() {
+        bail!("out of memory");
+    }
+    for (i, c) in list.iter().enumerate() {
+        let ch = av_mallocz(std::mem::size_of::<AVChapter>()) as *mut AVChapter;
+        if ch.is_null() {
+            bail!("out of memory");
+        }
+        (*ch).id = i as i64;
+        (*ch).time_base = AVRational { num: 1, den: 1000 };
+        (*ch).start = (c.start.max(0.0) * 1000.0).round() as i64;
+        (*ch).end = ((c.end.max(c.start) * 1000.0).round() as i64).max((*ch).start + 1);
+        let title = CString::new(c.title.replace('\0', " "))?;
+        av_dict_set(&mut (*ch).metadata, c"title".as_ptr(), title.as_ptr(), 0);
+        *array.add(i) = ch;
+        (*oc).chapters = array;
+        (*oc).nb_chapters = i as u32 + 1;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 struct Track {
@@ -25,6 +70,9 @@ pub struct Muxer {
     /// Set by the first packet, which has to be a video keyframe.
     started: bool,
     header_written: bool,
+    crash_safe: bool,
+    /// Makes the chapters once the start of the file is known (see `plan_chapters`).
+    plan: Option<Box<dyn FnOnce(i64) -> Vec<Chapter> + Send>>,
     /// The moment (pipeline clock, microseconds) that is zero in the file.
     pub start_us: Option<i64>,
     pub bytes: u64,
@@ -34,7 +82,8 @@ pub struct Muxer {
 impl Muxer {
     /// `streams[0]` is the video track. `crash_safe` writes the file in fragments, so it stays
     /// playable if the program or the PC dies mid-recording; on a normal stop it is converted
-    /// to a regular MP4.
+    /// to a regular MP4. The header is written with the first picture (so chapters can be
+    /// placed by then).
     pub fn create(path: &Path, streams: &[Arc<StreamInfo>], crash_safe: bool) -> Result<Self> {
         let cpath = CString::new(path.to_string_lossy().as_bytes())?;
         let mut m = Muxer {
@@ -44,6 +93,8 @@ impl Muxer {
             started: false,
             start_us: None,
             header_written: false,
+            crash_safe,
+            plan: None,
             bytes: 0,
             frames: 0,
         };
@@ -72,21 +123,32 @@ impl Muxer {
             }
 
             chk(avio_open(&mut (*m.oc).pb, cpath.as_ptr(), AVIO_FLAG_WRITE as i32), "cannot create file")?;
-
-            let mut opts: *mut AVDictionary = null_mut();
-            if crash_safe {
-                av_dict_set(&mut opts, c"movflags".as_ptr(), c"+hybrid_fragmented+frag_keyframe".as_ptr(), 0);
-            }
-            let r = avformat_write_header(m.oc, &mut opts);
-            av_dict_free(&mut opts);
-            chk(r, "avformat_write_header")?;
-            m.header_written = true;
-            for (i, t) in m.tracks.iter_mut().enumerate() {
-                t.dst_tb = (**(*m.oc).streams.add(i)).time_base;
-            }
             m.pkt = av_packet_alloc();
         }
         Ok(m)
+    }
+
+    /// Chapters for the file, made from the moment that becomes its zero (pipeline clock, us),
+    /// which is known only when the first picture arrives.
+    pub fn plan_chapters(&mut self, plan: impl FnOnce(i64) -> Vec<Chapter> + Send + 'static) {
+        self.plan = Some(Box::new(plan));
+    }
+
+    fn write_header(&mut self) -> Result<()> {
+        unsafe {
+            let mut opts: *mut AVDictionary = null_mut();
+            if self.crash_safe {
+                av_dict_set(&mut opts, c"movflags".as_ptr(), c"+hybrid_fragmented+frag_keyframe".as_ptr(), 0);
+            }
+            let r = avformat_write_header(self.oc, &mut opts);
+            av_dict_free(&mut opts);
+            chk(r, "avformat_write_header")?;
+            self.header_written = true;
+            for (i, t) in self.tracks.iter_mut().enumerate() {
+                t.dst_tb = (**(*self.oc).streams.add(i)).time_base;
+            }
+        }
+        Ok(())
     }
 
     /// Packets before the first video keyframe, and sound that belongs before it, are skipped.
@@ -111,6 +173,10 @@ impl Muxer {
                 t.base = if i == 0 { video_base } else { unsafe { av_rescale_q(start_us, us, t.src_tb) } };
             }
             self.start_us = Some(start_us);
+            if let Some(plan) = self.plan.take() {
+                unsafe { set_chapters(self.oc, &plan(start_us))? };
+            }
+            self.write_header()?;
         }
         let Track { src_tb, dst_tb, base } = self.tracks[idx];
         if p.pts < base || p.dts < base {
@@ -137,6 +203,9 @@ impl Muxer {
 
     /// Finalizes the file. Dropping a Muxer without calling this leaves it as it is.
     pub fn finish(mut self) -> Result<()> {
+        if !self.header_written {
+            self.write_header()?; // not a single picture came: still a valid (empty) file
+        }
         unsafe {
             self.header_written = false;
             chk(av_write_trailer(self.oc), "av_write_trailer")?;

@@ -439,7 +439,6 @@ const ICONS = {
   rename: '<svg viewBox="0 0 16 16"><path d="M10.6 2.8l2.6 2.6-7.4 7.4H3.2v-2.6zM9 4.4l2.6 2.6"/></svg>',
   scissors: '<svg viewBox="0 0 16 16"><circle cx="4.2" cy="12" r="2.2"/><circle cx="11.8" cy="12" r="2.2"/><path d="M5.6 10.2L11.5 2M10.4 10.2L4.5 2"/></svg>',
   pause: '<svg viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
-  resolve: '<svg viewBox="0 0 16 16"><path d="M8 2.5v7.5M4.8 6.8L8 10l3.2-3.2M3 12.5h10"/></svg>',
   chevron: '<svg viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>',
   trash: '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
@@ -504,8 +503,7 @@ function fileRow(f) {
       <div class="acts">
         <button class="icon-btn" data-op="open" aria-label="Открыть: ${esc(f.name)}" title="Открыть">${ICONS.play}</button>
         <button class="icon-btn" data-op="reveal" aria-label="Показать в папке: ${esc(f.name)}" title="Показать в папке">${ICONS.folder}</button>
-        ${f.kind === "shot" ? "" : `<button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>
-        <button class="icon-btn" data-op="resolve" aria-label="В Resolve: ${esc(f.name)}" title="В Resolve — в открытый проект, вместе с метками">${ICONS.resolve}</button>`}
+        ${f.kind === "shot" ? "" : `<button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>`}
         <button class="icon-btn" data-op="rename" aria-label="Переименовать: ${esc(f.name)}" title="Переименовать">${ICONS.rename}</button>
         <button class="icon-btn" data-op="delete" aria-label="В корзину: ${esc(f.name)}" title="В корзину">${ICONS.trash}</button>
       </div>
@@ -976,7 +974,6 @@ window.rewind = {
     drawTrim();
   },
   files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening || editingMark()) stale = true; else render(); } },
-  resolved() {},
   update(state) {
     Object.assign(S, state);
     if (listening || $("menu") || editingMark()) stale = true;

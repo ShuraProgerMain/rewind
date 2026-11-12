@@ -82,6 +82,8 @@ pub enum Cmd {
     ToggleBuffer,
     /// Mark this moment (the id comes back in Event::Marked and in the saved files).
     Mark(u64),
+    /// A title for a marker, for the files still to be finished (they carry it as a chapter).
+    MarkTitle(u64, String),
     /// Apply new settings. A running pipeline is restarted (the buffer starts over, an
     /// ongoing recording is finalized first).
     SetConfig(Box<Config>),
@@ -121,6 +123,8 @@ pub struct Mark {
     pub id: u64,
     /// Seconds from the start of the file.
     pub secs: f64,
+    /// The title written into the file's chapter (empty: none was known yet).
+    pub title: String,
 }
 
 /// Marks that fall inside a file that starts at `start_us` and lasts `secs`.
@@ -128,7 +132,7 @@ fn marks_in(marks: &[(u64, i64)], start_us: Option<i64>, secs: f64) -> Vec<Mark>
     let Some(start) = start_us else { return Vec::new() };
     marks
         .iter()
-        .map(|&(id, at)| Mark { id, secs: (at - start) as f64 / 1e6 })
+        .map(|&(id, at)| Mark { id, secs: (at - start) as f64 / 1e6, title: String::new() })
         .filter(|m| m.secs >= 0.0 && m.secs <= secs + 0.05)
         .collect()
 }
@@ -145,6 +149,8 @@ enum WMsg {
     StopRec,
     /// A mark for the running recording: id and moment (pipeline clock, us).
     Mark(u64, i64),
+    /// A marker's title, for the chapters of files finished from now on.
+    MarkTitle(u64, String),
     /// Packets for a clip, its file, and the marks that may fall inside it.
     Save(Vec<Pkt>, PathBuf, Vec<(u64, i64)>),
     Quit,
@@ -173,6 +179,7 @@ pub fn run(mut cfg: Config, rx: Receiver<Cmd>, emit: Emit) {
                 Ok(Cmd::ToggleRecord) => st.want_rec = true,
                 Ok(Cmd::SaveClip) => emit(Event::NothingToSave),
                 Ok(Cmd::Mark(_)) => emit(Event::NothingToMark),
+                Ok(Cmd::MarkTitle(..)) => {}
                 Ok(Cmd::SetConfig(c)) => cfg = *c,
                 Ok(Cmd::Quit) | Err(_) => return,
             }
@@ -331,6 +338,9 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                         let rec_secs = recording.then(|| (at - rec_started_us).max(0) as f64 / 1e6);
                         emit(Event::Marked { id, rec_secs });
                     }
+                    Cmd::MarkTitle(id, title) => {
+                        let _ = wtx.send(WMsg::MarkTitle(id, title));
+                    }
                     Cmd::ToggleBuffer => {
                         st.buffer_on = !st.buffer_on && cfg.buffer_secs > 0;
                         ring.clear();
@@ -429,13 +439,26 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
 }
 
 /// Disk work lives here so a slow drive can never stall the frame loop.
+/// Gives the marks the titles known so far and makes the file's chapters from them.
+fn chapters_for(marks: &mut [Mark], titles: &std::collections::HashMap<u64, String>, secs: f64) -> Vec<crate::mux::Chapter> {
+    for m in marks.iter_mut() {
+        m.title = titles.get(&m.id).cloned().unwrap_or_default();
+    }
+    let markers: Vec<crate::marks::Marker> =
+        marks.iter().map(|m| crate::marks::Marker { id: m.id, t: m.secs, title: m.title.clone() }).collect();
+    crate::marks::chapters(&markers, secs)
+}
+
 fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit: Emit) {
+    let titles = std::cell::RefCell::new(std::collections::HashMap::<u64, String>::new());
     struct Rec {
         mux: Muxer,
         path: PathBuf,
         marks: Vec<(u64, i64)>,
     }
     let mut rec: Option<Rec> = None;
+    // A recording's markers come while it is being written, after its header, so they cannot
+    // become chapters here: the app writes them in afterwards (library::rewrite_chapters).
     let finish = |r: Rec| {
         let (frames, bytes) = (r.mux.frames, r.mux.bytes);
         let secs = frames as f64 / fps as f64;
@@ -467,6 +490,9 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
                     r.marks.push((id, at));
                 }
             }
+            WMsg::MarkTitle(id, title) => {
+                titles.borrow_mut().insert(id, title);
+            }
             WMsg::StopRec => {
                 if let Some(r) = rec.take() {
                     finish(r);
@@ -474,25 +500,30 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
             }
             WMsg::Save(packets, path, marks) => {
                 let t = Instant::now();
-                let res: Result<(u64, u64, Option<i64>)> = (|| {
+                let res: Result<(u64, u64, Vec<Mark>)> = (|| {
                     let mut m = Muxer::create(&path, &infos, false)?;
+                    // The clip's markers are known before it is written: they become chapters.
+                    let pictures = packets.iter().filter(|p| p.stream == 0).count();
+                    let (plan_marks, plan_titles) = (marks.clone(), titles.borrow().clone());
+                    m.plan_chapters(move |start_us| {
+                        let secs = pictures as f64 / fps as f64;
+                        let mut inside = marks_in(&plan_marks, Some(start_us), secs);
+                        chapters_for(&mut inside, &plan_titles, secs)
+                    });
                     for p in &packets {
                         m.write(p)?;
                     }
-                    let out = (m.frames, m.bytes, m.start_us);
+                    let secs = m.frames as f64 / fps as f64;
+                    let mut inside = marks_in(&marks, m.start_us, secs);
+                    chapters_for(&mut inside, &titles.borrow(), secs); // titles, as written
+                    let out = (m.frames, m.bytes, inside);
                     m.finish()?;
                     Ok(out)
                 })();
                 match res {
-                    Ok((frames, bytes, start_us)) => {
+                    Ok((frames, bytes, inside)) => {
                         let secs = frames as f64 / fps as f64;
-                        emit(Event::ClipSaved {
-                            path,
-                            secs,
-                            bytes,
-                            ms: t.elapsed().as_millis(),
-                            marks: marks_in(&marks, start_us, secs),
-                        })
+                        emit(Event::ClipSaved { path, secs, bytes, ms: t.elapsed().as_millis(), marks: inside })
                     }
                     Err(e) => emit(Event::Error(format!("could not save the clip: {e:#}"))),
                 }

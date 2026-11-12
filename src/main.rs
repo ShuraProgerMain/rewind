@@ -28,7 +28,6 @@ mod marks;
 mod notebox;
 mod mux;
 mod picker;
-mod resolve;
 mod ring;
 mod settings;
 mod shot;

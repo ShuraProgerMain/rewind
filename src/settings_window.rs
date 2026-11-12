@@ -43,7 +43,7 @@ use wry::{Theme, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 // Design size in 96-dpi pixels.
 const WIDTH: i32 = 600;
-const HEIGHT: i32 = 444;
+const HEIGHT: i32 = 476;
 
 const PAGE: &str = include_str!("../ui/index.html");
 const FONT: &[u8] = include_bytes!("../ui/Inter.ttf");
@@ -215,7 +215,26 @@ impl SettingsWindow {
             let mut context = WebContext::new(Some(data_dir.join("webview")));
             let built = WebViewBuilder::new_with_web_context(&mut context)
                 .with_transparent(true)
-                .with_custom_protocol("rewind".into(), |_id, request| serve(request))
+                .with_asynchronous_custom_protocol("rewind".into(), |_id, request, responder| {
+                    if request.uri().path() != "/thumb" {
+                        responder.respond(serve(request));
+                        return;
+                    }
+                    // Preview pictures are decoded from the videos: off the window's thread.
+                    let query = request.uri().query().unwrap_or_default().to_string();
+                    std::thread::spawn(move || {
+                        let file = query.split('&').find_map(|kv| kv.strip_prefix("p=")).map(crate::library::percent_decode);
+                        let picture = file.and_then(|f| crate::library::thumbnail(Path::new(&f)).ok());
+                        let response = match picture {
+                            Some(bytes) => Response::builder()
+                                .header("Content-Type", "image/bmp")
+                                .header("Cache-Control", "max-age=86400")
+                                .body(Cow::Owned(bytes)),
+                            None => Response::builder().status(404).body(Cow::Borrowed(&[][..])),
+                        };
+                        responder.respond(response.expect("response"));
+                    });
+                })
                 .with_url("rewind://localhost/index.html")
                 .with_ipc_handler(move |request| on_message(request.into_body()))
                 .with_browser_accelerator_keys(false)

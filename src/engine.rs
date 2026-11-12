@@ -57,6 +57,8 @@ pub struct Config {
     /// Memory limit for the replay buffer.
     pub ring_mb: usize,
     pub out_dir: PathBuf,
+    /// Put files into a folder per game/program (else the name goes into the file name).
+    pub folders_by_app: bool,
     /// Record only this area of the source: x, y, width, height.
     pub crop: Option<(u32, u32, u32, u32)>,
     pub cursor: bool,
@@ -255,7 +257,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
             // Start/stop requests that arrived while the pipeline was down or since the last tick.
             if st.want_rec != recording {
                 if st.want_rec {
-                    let path = out_path(&cfg.out_dir, "Rec")?;
+                    let path = out_path(cfg, "Запись")?;
                     let _ = wtx.send(WMsg::StartRec(path));
                     force_key = true; // the file must begin with a keyframe: make one right now
                 } else {
@@ -339,7 +341,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                     if pk.is_empty() {
                         emit(Event::NothingToSave);
                     } else {
-                        let _ = wtx.send(WMsg::Save(pk, out_path(&cfg.out_dir, "Clip")?));
+                        let _ = wtx.send(WMsg::Save(pk, out_path(cfg, "Клип")?));
                     }
                 }
             }
@@ -448,13 +450,30 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
     }
 }
 
-fn out_path(dir: &PathBuf, prefix: &str) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+/// What is being recorded, as people call it: the recorded window's program, or (for a
+/// whole display) the program in front at this moment. The desktop and Explorer count as
+/// "Рабочий стол".
+fn subject(cfg: &Config) -> String {
+    let app = match cfg.source {
+        Source::Window(hwnd) => crate::sources::app_of_window(hwnd),
+        Source::Monitor(_) => {
+            let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+            crate::sources::app_of_window(front.0 as isize)
+                .filter(|a| a.pid != std::process::id() && a.exe != "explorer.exe")
+        }
+    };
+    app.map(|a| a.name).unwrap_or_else(|| "Рабочий стол".to_string())
+}
+
+/// `<folder>/<program>/2026-11-12 14-03-05 Клип.mp4`: the date and time come first, so
+/// sorting by name is the order in which clips and recordings were made.
+fn out_path(cfg: &Config, kind: &str) -> Result<PathBuf> {
+    let name = crate::library::safe_name(&subject(cfg));
+    let dir = if cfg.folders_by_app { cfg.out_dir.join(&name) } else { cfg.out_dir.clone() };
+    std::fs::create_dir_all(&dir)?;
     let t = unsafe { GetLocalTime() };
-    let stem = format!(
-        "{prefix} {:04}-{:02}-{:02} {:02}-{:02}-{:02}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
-    );
+    let when = format!("{:04}-{:02}-{:02} {:02}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    let stem = if cfg.folders_by_app { format!("{when} {kind}") } else { format!("{when} {kind} — {name}") };
     let mut path = dir.join(format!("{stem}.mp4"));
     let mut n = 2;
     while path.exists() {

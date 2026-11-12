@@ -89,7 +89,9 @@ Shot 'page-files'
 Js "cmd('record')"; Start-Sleep 3
 Shot 'page-recording'
 Js "cmd('record')"; Start-Sleep 2
-Check 'record button makes a file' (@(Get-ChildItem "$Data\out\Rec*.mp4").Count -ge 1)
+# No clip is saved in this test, so any video in the folder is the recording. (No Cyrillic
+# here: Windows PowerShell 5 reads this file as ANSI.)
+Check 'record button makes a file' (@(Get-ChildItem "$Data\out" -Recurse -Filter '*.mp4').Count -ge 1)
 
 # closing releases the browser
 Js "cmd('close')"; Start-Sleep 4

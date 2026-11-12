@@ -61,6 +61,8 @@ pub struct Settings {
     pub buffer_memory_mb: usize,
     /// Empty = the user's Videos folder \ Rewind.
     pub output_dir: String,
+    /// A folder per game/program inside the output folder.
+    pub folders_by_app: bool,
     pub cursor: bool,
     pub system_sound: bool,
     /// Where that sound comes from: everything, the recorded window's program, or one program.
@@ -69,6 +71,8 @@ pub struct Settings {
     pub audio_kbit: u32,
     pub hotkeys: Hotkeys,
     pub notifications: bool,
+    /// On-screen pill: "recording" (while recording), "always" (also while the buffer runs) or "off".
+    pub indicator: String,
     /// Start with Windows, silently in the tray.
     pub autostart: bool,
     /// Keep a shortcut in the Start menu.
@@ -90,6 +94,7 @@ impl Default for Settings {
             buffer_on: true,
             buffer_memory_mb: 4096,
             output_dir: String::new(),
+            folders_by_app: true,
             cursor: true,
             system_sound: true,
             sound_from: SoundFrom::All,
@@ -97,6 +102,7 @@ impl Default for Settings {
             audio_kbit: 192,
             hotkeys: Hotkeys::default(),
             notifications: true,
+            indicator: "recording".into(),
             autostart: false,
             start_menu: true,
             auto_update: true,
@@ -193,6 +199,7 @@ impl Settings {
             buffer_on: self.buffer_on && self.buffer_seconds > 0,
             ring_mb: self.buffer_memory_mb.max(64),
             out_dir: self.output_dir(),
+            folders_by_app: self.folders_by_app,
             crop: self.crop.map(|c| (c[0], c[1], c[2], c[3])),
             cursor: self.cursor,
             audio_system: self.system_sound,

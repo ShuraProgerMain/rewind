@@ -65,6 +65,7 @@ fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
         buffer_on: true,
         ring_mb: 4096,
         out_dir: PathBuf::new(),
+        folders_by_app: false,
         crop: None,
         cursor: true,
         audio_system: true,
@@ -103,6 +104,23 @@ fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
             }
             "--dump-icons" => {
                 icons::dump(&PathBuf::from(val()?))?;
+                return Ok(None);
+            }
+            "--probe" => {
+                // Diagnostics for the recordings list: length and preview of one file.
+                let file = PathBuf::from(val()?);
+                let root = file.parent().and_then(|p| p.parent()).unwrap_or(&file).to_path_buf();
+                crate::library::configure(root.clone(), std::env::temp_dir().join("rewind-probe-thumbs"));
+                println!("inside: {}", crate::library::inside(&file));
+                for e in crate::library::list(500) {
+                    if PathBuf::from(&e.path) == file {
+                        println!("listed: kind={} app={} secs={:.2} bytes={}", e.kind, e.app, e.secs, e.bytes);
+                    }
+                }
+                match crate::library::thumbnail(&file) {
+                    Ok(bmp) => println!("thumbnail: {} bytes", bmp.len()),
+                    Err(e) => println!("thumbnail failed: {e:#}"),
+                }
                 return Ok(None);
             }
             "--make-ico" => {

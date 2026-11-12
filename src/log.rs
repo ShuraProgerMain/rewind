@@ -49,5 +49,8 @@ unsafe extern "C" fn ffmpeg_log(ptr: *mut c_void, level: c_int, fmt: *const c_ch
     let mut prefix: c_int = 1;
     ffi::av_log_format_line2(ptr, level, fmt, args, buf.as_mut_ptr(), buf.len() as c_int, &mut prefix);
     let text = CStr::from_ptr(buf.as_ptr()).to_string_lossy();
+    if text.contains("UDTA parsing failed") {
+        return; // harmless, printed for every MP4 the recordings list reads
+    }
     line(&format!("ffmpeg: {}", text.trim_end()));
 }

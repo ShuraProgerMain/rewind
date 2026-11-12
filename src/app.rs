@@ -230,6 +230,31 @@ impl App {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
         self.shown_icon = self.icon_state() as usize;
+        self.update_indicator();
+    }
+
+    /// The on-screen pill: while recording, or also while the buffer runs, as the user chose.
+    fn update_indicator(&self) {
+        use crate::indicator::{set, Show};
+        let mode = self.settings.indicator.as_str();
+        let show = if mode == "off" {
+            Show::Hidden
+        } else if self.recording {
+            Show::Recording
+        } else if self.buffer_on && mode == "always" {
+            Show::Buffer
+        } else {
+            Show::Hidden
+        };
+        // On the display being recorded (for a window: the display it is on).
+        let monitor = match self.engine_cfg.as_ref().map(|c| c.source) {
+            Some(crate::capture::Source::Monitor(h)) => h,
+            Some(crate::capture::Source::Window(h)) => unsafe {
+                windows::Win32::Graphics::Gdi::MonitorFromWindow(HWND(h as _), windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST).0 as isize
+            },
+            None => 0,
+        };
+        set(show, monitor);
     }
 
     fn make_icons(&mut self) {
@@ -362,6 +387,7 @@ impl App {
 
     /// Start menu shortcut and autostart follow the two switches (real copies only).
     fn apply_system(&self) {
+        self.configure_library();
         if let Some(system) = &self.system {
             if let Err(e) = system.apply(self.settings.start_menu, self.settings.autostart) {
                 log::line(&format!("system integration: {e:#}"));
@@ -430,6 +456,52 @@ impl App {
         }
     }
 
+    /// The recordings folder, as the file list and the page server see it.
+    fn configure_library(&self) {
+        crate::library::configure(self.settings.output_dir(), self.data_dir.join("thumbs"));
+    }
+
+    /// Sends the list of clips and recordings to the settings page, if it is open.
+    fn push_files(&self) {
+        if let Some(ui) = &self.ui {
+            let list = crate::library::list(60);
+            ui.eval(&format!("window.rewind&&window.rewind.files({})", serde_json::to_string(&list).unwrap_or("[]".into())));
+        }
+    }
+
+    /// Open / show / rename / delete one file from the list on the page.
+    fn on_file(&mut self, op: &str, path: &str, name: &str) {
+        let path = PathBuf::from(path);
+        if !crate::library::inside(&path) {
+            log::line(&format!("refused a file action outside the recordings folder: {}", path.display()));
+            return;
+        }
+        match op {
+            "open" => open_path(path, None),
+            "reveal" => reveal_file(path),
+            "delete" => match crate::library::recycle(&path) {
+                Ok(()) => {
+                    if self.last_file.as_ref() == Some(&path) {
+                        self.last_file = None;
+                    }
+                    self.notify(Tone::Info, "Перемещено в корзину", &path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                }
+                Err(e) => self.notify(Tone::Error, "Не удалось удалить", &format!("{e:#}")),
+            },
+            "rename" => match crate::library::rename(&path, name) {
+                Ok(new) => {
+                    if self.last_file.as_ref() == Some(&path) {
+                        self.last_file = Some(new);
+                    }
+                }
+                Err(e) => self.notify(Tone::Error, "Не удалось переименовать", &format!("{e:#}")),
+            },
+            _ => {}
+        }
+        self.push_files();
+        self.push_state();
+    }
+
     fn close_settings(&mut self) {
         if self.ui.take().is_some() {
             self.ui_ready = false;
@@ -469,6 +541,10 @@ impl App {
                 }
             }
             "set" => self.merge_settings(&msg["settings"]),
+            "file" => {
+                let field = |k: &str| msg[k].as_str().unwrap_or_default().to_string();
+                self.on_file(&field("op"), &field("path"), &field("name"));
+            }
             // Diagnostics from the page (test scripts), shortened.
             "log" => log::line(&format!("page: {}", msg["text"].as_str().unwrap_or("").chars().take(300).collect::<String>())),
             "cmd" => match msg["name"].as_str()? {
@@ -477,6 +553,7 @@ impl App {
                 "buffer" => self.on_command(CMD_BUFFER),
                 "open_folder" => self.on_command(CMD_OPEN_FOLDER),
                 "show_last" => self.on_command(CMD_SHOW_LAST),
+                "files" => self.push_files(),
                 "open_log" => self.on_command(CMD_OPEN_LOG),
                 "clear_area" => {
                     self.settings.crop = None;
@@ -607,6 +684,7 @@ impl App {
         }
         self.update_tray();
         self.push_state();
+        self.push_files(); // a new clip or recording appears in the list at once
     }
 
     fn build_menu(&mut self) -> HMENU {

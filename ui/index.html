@@ -87,6 +87,23 @@ button { font: inherit; color: inherit; cursor: default; }
 .note { padding: 9px 0 0; font-size: 11px; line-height: 15px; color: var(--secondary); }
 .row.tall { padding: 7px 0; }
 
+/* ---------- recordings list ---------- */
+.list { height: 188px; overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
+.list::-webkit-scrollbar { width: 6px; }
+.list::-webkit-scrollbar-thumb { background: var(--track); border-radius: 3px; }
+.day { font-size: 11px; line-height: 15px; color: var(--secondary); padding: 8px 0 4px; }
+.file { display: flex; align-items: center; gap: 11px; height: 58px; padding: 0 6px; margin: 0 -6px; border-radius: 7px; }
+.file:hover, .file:focus-within { background: var(--hover); }
+.file img, .file .noimg { width: 80px; height: 45px; border-radius: 4px; flex: none; object-fit: cover; background: var(--track); }
+.file .info { flex: 1; min-width: 0; }
+.file .info b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file .info span { display: block; font-size: 11px; line-height: 15px; color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file .acts { display: flex; gap: 2px; opacity: 0; }
+.file:hover .acts, .file:focus-within .acts { opacity: 1; }
+.file .acts .icon-btn { width: 28px; height: 28px; }
+.file input { width: 100%; height: 24px; padding: 0 6px; font: inherit; font-weight: 600; color: var(--label); background: var(--input); border: 1px solid var(--accent); border-radius: 5px; outline: none; }
+.empty { height: 188px; display: grid; place-items: center; color: var(--secondary); text-align: center; }
+
 /* ---------- switch ---------- */
 .switch { width: 34px; height: 20px; border: 0; padding: 0; border-radius: 10px; background: var(--track); position: relative; flex: none; }
 .switch::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.3); }
@@ -139,7 +156,7 @@ button { font: inherit; color: inherit; cursor: default; }
 
 <script>
 "use strict";
-const TABS = [["capture", "Запись"], ["video", "Видео"], ["sound", "Звук"], ["keys", "Клавиши"], ["files", "Файлы"], ["system", "Система"]];
+const TABS = [["capture", "Запись"], ["video", "Видео"], ["sound", "Звук"], ["keys", "Клавиши"], ["files", "Записи"], ["system", "Система"]];
 const LENGTHS = [30, 60, 120, 300, 600, 900, 1800, 3600];
 const CHECK = '<svg viewBox="0 0 12 12"><path d="M2.2 6.4l2.6 2.6 5-6"/></svg>';
 const CHEVRONS = '<svg viewBox="0 0 10 14"><path d="M2.4 5.2L5 2.6l2.6 2.6M2.4 8.8L5 11.4l2.6-2.6"/></svg>';
@@ -153,6 +170,8 @@ let S = {
   monitors: [{ device:"\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
   windows: ["Telegram", "Obsidian"],
   status: { buffer_on: true, recording: false, has_last: false },
+  files: [{ path: "C:\\Videos\\Rewind\\ELDEN RING\\2026-11-12 14-03-05 Клип.mp4", name: "2026-11-12 14-03-05 Клип", kind: "clip", app: "ELDEN RING", time: Date.now() - 600000, bytes: 88000000, secs: 120 },
+          { path: "C:\\Videos\\Rewind\\Рабочий стол\\2026-11-11 20-21-02 Запись.mp4", name: "2026-11-11 20-21-02 Запись", kind: "rec", app: "Рабочий стол", time: Date.now() - 90000000, bytes: 10500000, secs: 7.7 }],
   taken: [], folder: "C:\\Users\\me\\Videos\\Rewind", version: "0.0.0",
   system: { available: true }, update: { state: "idle" },
 };
@@ -261,6 +280,8 @@ function pageCapture() {
   const s = S.settings, isWindow = s.source.type === "window";
   MENUS.source = { items: sourceItems(), current: s.source, pick: (v) => set({ source: v, crop: null }) };
   MENUS.length = { items: LENGTHS.map((v) => ({ label: duration(v), value: v })), current: s.buffer_seconds, pick: (v) => set({ buffer_seconds: v }) };
+  const marks = [["recording", "Во время записи"], ["always", "Всегда"], ["off", "Выключен"]];
+  MENUS.indicator = { items: marks.map(([v, l]) => ({ label: l, value: v })), current: s.indicator || "recording", pick: (v) => set({ indicator: v }) };
   MENUS.memory = { items: [1024, 2048, 4096, 8192, 16384].map((v) => ({ label: size(v), value: v })), current: s.buffer_memory_mb, pick: (v) => set({ buffer_memory_mb: v }) };
   if (!LENGTHS.includes(s.buffer_seconds)) MENUS.length.items.push({ label: duration(s.buffer_seconds), value: s.buffer_seconds });
   if (![1024, 2048, 4096, 8192, 16384].includes(s.buffer_memory_mb)) MENUS.memory.items.push({ label: size(s.buffer_memory_mb), value: s.buffer_memory_mb });
@@ -273,6 +294,7 @@ function pageCapture() {
       ${isWindow ? "" : '<button class="push small" data-cmd="pick_area">Выбрать…</button>'}</div>
     <div class="row"><div class="name">Длина буфера</div>${popup("length", MENUS.length.items, s.buffer_seconds)}</div>
     <div class="row"><div class="name">Память под буфер</div>${popup("memory", MENUS.memory.items, s.buffer_memory_mb)}</div>
+    <div class="row"><div class="name">Индикатор на экране<small>В углу записываемого экрана; в запись не попадает</small></div>${popup("indicator", MENUS.indicator.items, s.indicator || "recording")}</div>
     <div class="row"><div class="name">Указатель мыши в записи</div><button class="switch ${s.cursor ? "on" : ""}" data-toggle="cursor"></button></div>
     <div class="note">Буфер хранится в оперативной памяти уже сжатым. ${duration(s.buffer_seconds)} займут не больше ${size(Math.min(worst, s.buffer_memory_mb))}${worst > s.buffer_memory_mb ? " — при насыщенной картинке в память поместится меньше времени" : ", обычно в несколько раз меньше"}.</div>`;
 }
@@ -342,16 +364,79 @@ function pageKeys() {
     + `<div class="note">Нажмите на поле, затем на сочетание клавиш. Backspace убирает сочетание, Esc — отмена. Клавиши работают в любой программе и в играх.</div>`;
 }
 
+const ICONS = {
+  play: '<svg viewBox="0 0 16 16"><path d="M5 3.5v9l7.5-4.5z"/></svg>',
+  folder: '<svg viewBox="0 0 16 16"><path d="M2 4.6a1.4 1.4 0 0 1 1.4-1.4h2.9l1.4 1.6h4.9a1.4 1.4 0 0 1 1.4 1.4v5.8a1.4 1.4 0 0 1-1.4 1.4H3.4A1.4 1.4 0 0 1 2 12z"/></svg>',
+  rename: '<svg viewBox="0 0 16 16"><path d="M10.6 2.8l2.6 2.6-7.4 7.4H3.2v-2.6zM9 4.4l2.6 2.6"/></svg>',
+  trash: '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
+};
+let renaming = null; // path of the file whose name is being edited
+
+function when(ms) {
+  const d = new Date(ms), now = new Date();
+  const time = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return time;
+}
+function dayTitle(ms) {
+  const d = new Date(ms), today = new Date();
+  const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((start(today) - start(d)) / 86400000);
+  if (days === 0) return "Сегодня";
+  if (days === 1) return "Вчера";
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric" });
+}
+function length(secs) {
+  if (!secs) return "";
+  const s = Math.round(secs);
+  return s < 60 ? s + " с" : Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function bytes(n) {
+  const mb = n / 1048576;
+  return mb >= 1024 ? (mb / 1024).toFixed(1).replace(".", ",") + " ГБ" : (mb >= 10 ? Math.round(mb) : mb.toFixed(1).replace(".", ",")) + " МБ";
+}
+
+function fileRow(f) {
+  const kind = f.kind === "clip" ? "Клип" : f.kind === "rec" ? "Запись" : "Видео";
+  // A name Rewind gave ("2026-11-12 14-03-05 Клип") reads better as "Клип · ELDEN RING";
+  // a name the user typed is shown as it is, with the program next to the time.
+  const own = !/^\d{4}-\d\d-\d\d \d\d-\d\d-\d\d/.test(f.name);
+  const title = own ? f.name : (f.app ? `${kind} · ${f.app}` : kind);
+  const detail = [own ? f.app : "", when(f.time), length(f.secs), bytes(f.bytes)].filter(Boolean).join(" · ");
+  const p = esc(f.path);
+  const head = renaming === f.path
+    ? `<input data-rename="${p}" value="${esc(f.name)}" aria-label="Новое имя файла" spellcheck="false">`
+    : `<b title="${esc(f.name)}">${esc(title)}</b>`;
+  return `<div class="file" data-file="${p}">
+      <img src="thumb?p=${encodeURIComponent(f.path)}&v=${f.time}" alt="" loading="lazy" onerror="this.outerHTML='<div class=noimg></div>'">
+      <div class="info">${head}<span>${esc(detail)}</span></div>
+      <div class="acts">
+        <button class="icon-btn" data-op="open" aria-label="Открыть: ${esc(f.name)}" title="Открыть">${ICONS.play}</button>
+        <button class="icon-btn" data-op="reveal" aria-label="Показать в папке: ${esc(f.name)}" title="Показать в папке">${ICONS.folder}</button>
+        <button class="icon-btn" data-op="rename" aria-label="Переименовать: ${esc(f.name)}" title="Переименовать">${ICONS.rename}</button>
+        <button class="icon-btn" data-op="delete" aria-label="В корзину: ${esc(f.name)}" title="В корзину">${ICONS.trash}</button>
+      </div>
+    </div>`;
+}
+
 function pageFiles() {
   const s = S.settings;
-  return `
-    <div class="row"><div class="name">Папка для записей</div><div class="value" title="${esc(S.folder)}">${esc(shortPath(S.folder, 40))}</div>
-      <button class="push small" data-cmd="pick_folder">Обзор…</button></div>
-    <div class="row"><div class="name">Записи</div>
-      <button class="push small" data-cmd="show_last" ${S.status.has_last ? "" : "disabled"}>Показать последнюю</button>
-      <button class="push small" data-cmd="open_folder">Открыть папку</button></div>
-    <div class="row"><div class="name">Уведомления<small>Карточка в углу экрана; в запись не попадает</small></div><button class="switch ${s.notifications ? "on" : ""}" data-toggle="notifications"></button></div>
-    <div class="note">Клипы из буфера называются «Clip дата время», записи — «Rec дата время». Уже существующие файлы не перезаписываются.</div>`;
+  let list;
+  if (!S.files) list = '<div class="empty">Загружаю…</div>';
+  else if (!S.files.length) list = '<div class="empty">Здесь появятся клипы и записи.<br>Сохраните клип или начните запись.</div>';
+  else {
+    let day = "", rows = "";
+    for (const f of S.files) {
+      const d = dayTitle(f.time);
+      if (d !== day) { rows += `<div class="day">${esc(d)}</div>`; day = d; }
+      rows += fileRow(f);
+    }
+    list = `<div class="list" aria-label="Клипы и записи">${rows}</div>`;
+  }
+  return `${list}
+    <div class="row"><div class="name">Папка<small title="${esc(S.folder)}">${esc(shortPath(S.folder, 52))}</small></div>
+      <button class="push small" data-cmd="open_folder">Открыть</button>
+      <button class="push small" data-cmd="pick_folder">Изменить…</button></div>
+    <div class="row"><div class="name">По папкам игр и программ<small>${s.folders_by_app ? "Rewind\\ELDEN RING\\2026-11-12 14-03-05 Клип.mp4" : "Rewind\\2026-11-12 14-03-05 Клип — ELDEN RING.mp4"}</small></div><button class="switch ${s.folders_by_app ? "on" : ""}" data-toggle="folders_by_app"></button></div>`;
 }
 
 function pageSystem() {
@@ -367,10 +452,12 @@ function pageSystem() {
     : `<button class="push small" data-cmd="check_update" ${u.state === "checking" ? "disabled" : ""}>Проверить</button>`;
   const version = `<div class="row"><div class="name">Rewind ${esc(S.version)}${about ? "<small>" + esc(about) + "</small>" : ""}</div>${real ? button : ""}</div>`;
   const log = '<div class="row"><div class="name">Журнал работы</div><button class="push small" data-cmd="open_log">Открыть</button></div>';
+  const notes = `<div class="row"><div class="name">Уведомления<small>Карточка в углу экрана; в запись не попадает</small></div><button class="switch ${s.notifications ? "on" : ""}" data-toggle="notifications"></button></div>`;
   if (!real) {
-    return version + log + '<div class="note">Это переносная или тестовая копия со своей папкой настроек. Она не добавляет себя в меню «Пуск» и в автозапуск и сама не обновляется.</div>';
+    return notes + version + log + '<div class="note">Это переносная или тестовая копия со своей папкой настроек. Она не добавляет себя в меню «Пуск» и в автозапуск и сама не обновляется.</div>';
   }
   return `
+    ${notes}
     <div class="row"><div class="name">Запускать вместе с Windows<small>Тихо, сразу в области уведомлений</small></div><button class="switch ${s.autostart ? "on" : ""}" data-toggle="autostart"></button></div>
     <div class="row"><div class="name">Ярлык в меню «Пуск»</div><button class="switch ${s.start_menu ? "on" : ""}" data-toggle="start_menu"></button></div>
     <div class="row"><div class="name">Обновлять автоматически<small>Проверка раз в сутки; новая версия ставится при следующем запуске</small></div><button class="switch ${s.auto_update ? "on" : ""}" data-toggle="auto_update"></button></div>
@@ -478,7 +565,8 @@ document.addEventListener("click", (e) => {
   if (!t) { if (listening) stopListening(); return; }
   if (t.dataset.key) { startListening(t.dataset.key); return; }
   if (listening) stopListening();
-  if (t.dataset.tab) { tab = t.dataset.tab; render(); }
+  if (t.dataset.op) { fileAction(t.dataset.op, t.closest("[data-file]").dataset.file); return; }
+  if (t.dataset.tab) { tab = t.dataset.tab; if (tab === "files") cmd("files"); render(); }
   else if (t.dataset.toggle) set({ [t.dataset.toggle]: !S.settings[t.dataset.toggle] });
   else if (t.dataset.seg) set({ [t.dataset.seg]: JSON.parse(t.dataset.value) });
   else if (t.dataset.cmd) cmd(t.dataset.cmd);
@@ -533,14 +621,45 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("keyup", (e) => { if (listening && e.code === "PrintScreen") { e.preventDefault(); finishKey(e); } }, true);
 window.addEventListener("blur", () => { closeMenu(); if (listening) stopListening(); });
 
+function fileAction(op, path) {
+  if (op === "rename") {
+    renaming = path; render();
+    const field = document.querySelector("[data-rename]");
+    if (field) { field.focus(); field.select(); }
+    return;
+  }
+  send({ t: "file", op, path });
+}
+function finishRename(field, keep) {
+  const path = field.dataset.rename, name = field.value.trim();
+  renaming = null;
+  const old = (S.files || []).find((f) => f.path === path);
+  if (keep && name && old && name !== old.name) send({ t: "file", op: "rename", path, name });
+  render();
+}
+document.addEventListener("keydown", (e) => {
+  const field = e.target.closest && e.target.closest("[data-rename]");
+  if (!field) return;
+  if (e.key === "Enter") { e.preventDefault(); finishRename(field, true); }
+  else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finishRename(field, false); }
+}, true);
+document.addEventListener("focusout", (e) => {
+  if (e.target.dataset && e.target.dataset.rename && renaming) finishRename(e.target, true);
+});
+document.addEventListener("dblclick", (e) => {
+  const row = e.target.closest("[data-file]");
+  if (row && !e.target.closest("button, input")) fileAction("open", row.dataset.file);
+});
+
 window.rewind = {
+  files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening) stale = true; else render(); } },
   update(state) {
     Object.assign(S, state);
     if (listening || $("menu")) stale = true;
     else render();
   },
   // Test aid: switch the page from outside.
-  show(name) { tab = name; render(); },
+  show(name) { tab = name; if (tab === "files") cmd("files"); render(); },
 };
 render();
 send({ t: "ready" });

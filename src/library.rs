@@ -457,7 +457,21 @@ pub fn rewrite_chapters(path: &Path, progress: &mut dyn FnMut(f64)) -> Result<()
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    // Explorer (reading the comment or a thumbnail), antivirus and indexers hold a file for
+    // a moment: try for a few seconds before giving up.
+    let mut attempt = 0;
+    let replaced = loop {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => break Ok(()),
+            Err(e) if attempt < 20 => {
+                attempt += 1;
+                let _ = e;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    if let Err(e) = replaced {
         let _ = std::fs::remove_file(&tmp);
         crate::log::line(&format!("cannot replace {}: {e}", path.display()));
         bail!("файл открыт в другой программе. Закройте его и нажмите «Записать в видео»");

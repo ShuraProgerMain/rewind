@@ -17,6 +17,22 @@ pub struct Chapter {
     pub start: f64,
     pub end: f64,
     pub title: String,
+    /// A user's marker (not the "Начало" chapter that MP4 needs before the first one).
+    pub marker: bool,
+}
+
+/// "Метки (3): Boss fight · Метка 2 · Метка 3": the file's comment, which Explorer shows in
+/// its "Комментарии" column, so the markers can be seen without opening Rewind.
+pub fn marker_comment(list: &[Chapter]) -> Option<String> {
+    let titles: Vec<&str> = list.iter().filter(|c| c.marker).map(|c| c.title.as_str()).collect();
+    if titles.is_empty() {
+        return None;
+    }
+    let mut text = format!("Метки ({}): {}", titles.len(), titles.join(" · "));
+    if text.chars().count() > 250 {
+        text = text.chars().take(249).collect::<String>() + "…";
+    }
+    Some(text)
 }
 
 /// Sets the chapters of an output file. They must be set before its header is written: the
@@ -30,6 +46,15 @@ pub unsafe fn set_chapters(oc: *mut AVFormatContext, list: &[Chapter]) -> Result
     }
     av_freep(&mut (*oc).chapters as *mut *mut *mut AVChapter as *mut c_void);
     (*oc).nb_chapters = 0;
+    match marker_comment(list) {
+        Some(text) => {
+            let text = CString::new(text.replace('\0', " "))?;
+            av_dict_set(&mut (*oc).metadata, c"comment".as_ptr(), text.as_ptr(), 0);
+        }
+        None => {
+            av_dict_set(&mut (*oc).metadata, c"comment".as_ptr(), null(), 0);
+        }
+    }
     if list.is_empty() {
         return Ok(());
     }

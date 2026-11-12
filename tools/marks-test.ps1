@@ -29,6 +29,10 @@ function Inside($video) {
     $bytes = [Text.Encoding]::Default.GetBytes($json)   # ffprobe writes UTF-8; PowerShell read it as ANSI
     [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
 }
+# The comment Explorer shows in its "Comments" column.
+$shell = New-Object -ComObject Shell.Application
+# (Like Explorer, this holds the file for a moment; Rewind must cope with that.)
+function Comment($video) { $shell.Namespace($video.DirectoryName).ParseName($video.Name).ExtendedProperty('System.Comment') }
 function Starts($info) { ($info.chapters | ForEach-Object { '{0:N2}' -f [double]$_.start_time }) -join ', ' }
 
 $p = Start-Process $Exe -ArgumentList @('--data', "`"$Data`"") -PassThru
@@ -39,6 +43,7 @@ Send record; Start-Sleep 3
 Send record; Start-Sleep 3
 $plain = (Videos)[-1]
 $i = Inside $plain
+Check "recording without markers has no comment in Explorer" (-not (Comment $plain))
 Check "recording without markers has no chapters ($(@($i.chapters).Count)) and no extra track ($(@($i.streams).Count) tracks)" (@($i.chapters).Count -eq 0 -and @($i.streams | Where-Object codec_type -eq 'data').Count -eq 0)
 
 # --- a clip from the buffer with two markers, one titled in the box
@@ -58,6 +63,8 @@ Check "clip has 3 chapters: start + 2 markers ($(@($i.chapters).Count))" (@($i.c
 Check 'chapters start at the markers' (@($i.chapters).Count -eq 3 -and [double]$i.chapters[0].start_time -eq 0 -and [math]::Abs([double]$i.chapters[1].start_time - $m[0].t) -lt 0.02 -and [math]::Abs([double]$i.chapters[2].start_time - $m[1].t) -lt 0.02)
 Check 'the titled chapter carries its title' (@($i.chapters | Where-Object { $_.tags.title -eq 'Texture bug' }).Count -eq 1)
 Check "both sound tracks are still there ($(@($i.streams | Where-Object codec_type -eq 'audio').Count))" (@($i.streams | Where-Object codec_type -eq 'audio').Count -eq 2)
+$c = Comment $clip
+Check "Explorer shows the clip's markers in Comments ($c)" ($c -match '\(2\):' -and $c -match 'Texture bug')
 Check 'no files next to the clip but the marker file' (@(Get-ChildItem "$Data\out" -Filter ($clip.BaseName + '*')).Count -eq 2)
 
 # --- a recording: a marker at about 3 s, and one titled only after the recording ended
@@ -80,6 +87,8 @@ $i = Inside $rec
 '      recording chapters at: ' + (Starts $i) + ' / ' + (($i.chapters | ForEach-Object { $_.tags.title }) -join ' | ')
 Check 'recording has chapters at its markers' (@($i.chapters).Count -eq 3 -and [math]::Abs([double]$i.chapters[1].start_time - $m[0].t) -lt 0.02)
 Check '...and is written into the video at once' (@($i.chapters | Where-Object { $_.tags.title -eq 'Late title' }).Count -eq 1)
+$c = Comment (Get-Item -LiteralPath $rec.FullName)
+Check "Explorer shows the recording's markers once they are in the video ($c)" ($c -match '\(2\):' -and $c -match 'Late title')
 Check 'no temporary files left' (@(Get-ChildItem "$Data\out" -Filter '*rewind-tmp*').Count -eq 0)
 
 # --- the Records tab
@@ -89,7 +98,7 @@ Start-Sleep 1
 Js "document.querySelector('[data-op=marks]').click()"
 & "$PSScriptRoot\ui-shot.ps1" -Out "$Data\files-marks.png" -Margin 24 | Out-Null
 Js "{ const f = document.querySelector('[data-mark-title]'); f.focus(); f.value = 'Typed on the page'; f.blur(); }"
-Start-Sleep 3
+Start-Sleep 7   # a file held for a moment (as Explorer does) is retried for up to 5 s
 $m = @(Marks $rec)
 Check 'title edited on the page is saved' (@($m | Where-Object { $_.title -eq 'Typed on the page' }).Count -eq 1)
 Check 'the video keeps its date after the rewrite' ((Get-Item -LiteralPath $rec.FullName).LastWriteTime -eq $dateBefore)
@@ -104,7 +113,7 @@ Check "status says the markers are in the video ($state)" ($state -match '\bok\b
 $lock = [IO.File]::Open($rec.FullName, 'Open', 'Read', 'ReadWrite')   # like a player: no renaming meanwhile
 # (the window is in the background here, where focus events do not fire: commit directly)
 Js "{ const f = document.querySelector('[data-mark-title]'); f.value = 'Locked title'; commitMark(f); }"
-Start-Sleep 3
+Start-Sleep 8   # Rewind keeps trying for 5 s before it gives up
 $state = Pill
 Check "status shows the failure while the file is held ($state)" ($state -match '\bbad\b')
 Check '...with a button to try again' ((Select-String -Path "$Data\rewind.log" -Pattern 'chapters not written' -SimpleMatch).Count -ge 1)

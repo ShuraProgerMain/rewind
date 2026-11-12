@@ -93,12 +93,12 @@ pub fn chapters(markers: &[Marker], duration: f64) -> Vec<Chapter> {
     }
     let mut out = Vec::new();
     if sorted[0].t > 0.05 {
-        out.push(Chapter { start: 0.0, end: sorted[0].t, title: "Начало".into() });
+        out.push(Chapter { start: 0.0, end: sorted[0].t, title: "Начало".into(), marker: false });
     }
     for (i, m) in sorted.iter().enumerate() {
         let end = sorted.get(i + 1).map_or(duration, |next| next.t);
         let title = if m.title.trim().is_empty() { format!("Метка {}", i + 1) } else { m.title.trim().to_string() };
-        out.push(Chapter { start: m.t, end: end.max(m.t + 0.001), title });
+        out.push(Chapter { start: m.t, end: end.max(m.t + 0.001), title, marker: true });
     }
     out
 }
@@ -123,5 +123,8 @@ mod tests {
         let c = chapters(&[Marker { id: 1, t: 0.0, title: "Старт".into() }], 5.0);
         assert_eq!(c.len(), 1);
         assert!(chapters(&[], 5.0).is_empty());
+        let c = chapters(&marks, 10.0);
+        assert_eq!(crate::mux::marker_comment(&c).unwrap(), "Метки (2): Метка 1 · Баг с текстурой");
+        assert_eq!(crate::mux::marker_comment(&[]), None);
     }
 }

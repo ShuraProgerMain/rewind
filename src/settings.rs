@@ -35,6 +35,10 @@ pub struct Hotkeys {
     pub record: String,
     pub buffer: String,
     pub screenshot: String,
+    /// Mark the moment.
+    pub marker: String,
+    /// Mark the moment and type a title for it.
+    pub marker_note: String,
 }
 
 impl Default for Hotkeys {
@@ -44,6 +48,8 @@ impl Default for Hotkeys {
             record: "Ctrl+Alt+F9".into(),
             buffer: "Ctrl+Alt+F8".into(),
             screenshot: "Ctrl+Alt+F11".into(),
+            marker: "Ctrl+Alt+F12".into(),
+            marker_note: "Ctrl+Alt+Shift+F12".into(),
         }
     }
 }
@@ -56,6 +62,8 @@ pub struct PadKeys {
     pub record: String,
     pub buffer: String,
     pub screenshot: String,
+    pub marker: String,
+    pub marker_note: String,
 }
 
 impl PadKeys {
@@ -65,6 +73,8 @@ impl PadKeys {
             "record" => Some(&mut self.record),
             "buffer" => Some(&mut self.buffer),
             "screenshot" => Some(&mut self.screenshot),
+            "marker" => Some(&mut self.marker),
+            "marker_note" => Some(&mut self.marker_note),
             _ => None,
         }
     }

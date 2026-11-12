@@ -88,7 +88,7 @@ button { font: inherit; color: inherit; cursor: default; }
 .row.tall { padding: 7px 0; }
 
 /* ---------- recordings list ---------- */
-.list { height: 188px; overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
+.list { height: 236px; overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
 .list::-webkit-scrollbar { width: 6px; }
 .list::-webkit-scrollbar-thumb { background: var(--track); border-radius: 3px; }
 .day { font-size: 11px; line-height: 15px; color: var(--secondary); padding: 8px 0 4px; }
@@ -101,8 +101,24 @@ button { font: inherit; color: inherit; cursor: default; }
 .file .acts { display: flex; gap: 2px; opacity: 0; }
 .file:hover .acts, .file:focus-within .acts { opacity: 1; }
 .file .acts .icon-btn { width: 28px; height: 28px; }
+.file .pill { height: 20px; padding: 0 8px; margin-left: 6px; border-radius: 10px; border: 0; font-size: 11px; color: var(--label); background: var(--track); flex: none; display: inline-flex; align-items: center; gap: 4px; }
+.file .pill svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.6; transition: transform .15s; }
+.file .pill[aria-expanded="true"] svg { transform: rotate(180deg); }
+.file .info .title { display: flex; align-items: center; min-width: 0; font-size: inherit; line-height: inherit; color: var(--label); overflow: visible; }
+.file .info .title b { min-width: 0; }
+.marks { margin: 0 0 6px 91px; }
+.mrow { display: flex; align-items: center; gap: 8px; height: 40px; }
+.mrow img { width: 56px; height: 32px; border-radius: 3px; object-fit: cover; background: var(--track); flex: none; }
+.mrow .at { width: 46px; flex: none; font-size: 11px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.mrow input { flex: 1; min-width: 0; height: 26px; padding: 0 7px; font: inherit; color: var(--label); background: transparent; border: 1px solid transparent; border-radius: 5px; outline: none; }
+.mrow input:hover { border-color: var(--input-edge); }
+.mrow input:focus { border-color: var(--accent); background: var(--input); }
+.mrow input::placeholder { color: var(--placeholder); }
+.mrow .icon-btn { width: 26px; height: 26px; opacity: 0; }
+.mrow:hover .icon-btn, .mrow:focus-within .icon-btn { opacity: 1; }
+.timeline .mk { position: absolute; top: 2px; width: 2px; height: 10px; margin-left: -1px; border-radius: 1px; background: var(--orange, #ff9f0a); pointer-events: none; }
 .file input { width: 100%; height: 24px; padding: 0 6px; font: inherit; font-weight: 600; color: var(--label); background: var(--input); border: 1px solid var(--accent); border-radius: 5px; outline: none; }
-.empty { height: 188px; display: grid; place-items: center; color: var(--secondary); text-align: center; }
+.empty { height: 236px; display: grid; place-items: center; color: var(--secondary); text-align: center; }
 
 /* ---------- trim view ---------- */
 #trim { display: none; padding: 0 18px; }
@@ -195,15 +211,16 @@ const CHEVRONS = '<svg viewBox="0 0 10 14"><path d="M2.4 5.2L5 2.6l2.6 2.6M2.4 8
 let S = {
   settings: { source: { type: "primary" }, crop: null, fps: 60, codec: "hevc", quality: 20, max_mbit: 100,
     buffer_seconds: 600, buffer_memory_mb: 4096, output_dir: "", cursor: true, system_sound: true, microphone: true,
-    audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8", screenshot: "Ctrl+Alt+F11" },
-    pad: { save_clip: "LB+RB+L3+R3", record: "", buffer: "", screenshot: "" }, notifications: true },
+    audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8", screenshot: "Ctrl+Alt+F11", marker: "Ctrl+Alt+F12", marker_note: "Ctrl+Alt+Shift+F12" },
+    pad: { save_clip: "LB+RB+L3+R3", record: "", buffer: "", screenshot: "", marker: "", marker_note: "" }, notifications: true },
   pad: { learning: null, pads: null, hint: "" },
   apps: [{ exe: "eldenring.exe", name: "ELDEN RING" }, { exe: "telegram.exe", name: "Telegram Desktop" }],
   monitors: [{ device:"\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
   windows: ["Telegram", "Obsidian"],
   status: { buffer_on: true, recording: false, has_last: false },
-  files: [{ path: "C:\\Videos\\Rewind\\ELDEN RING\\2026-11-12 14-03-05 Клип.mp4", name: "2026-11-12 14-03-05 Клип", kind: "clip", app: "ELDEN RING", time: Date.now() - 600000, bytes: 88000000, secs: 120 },
-          { path: "C:\\Videos\\Rewind\\Рабочий стол\\2026-11-11 20-21-02 Запись.mp4", name: "2026-11-11 20-21-02 Запись", kind: "rec", app: "Рабочий стол", time: Date.now() - 90000000, bytes: 10500000, secs: 7.7 }],
+  files: [{ path: "C:\\Videos\\Rewind\\ELDEN RING\\2026-11-12 14-03-05 Клип.mp4", name: "2026-11-12 14-03-05 Клип", kind: "clip", app: "ELDEN RING", time: Date.now() - 600000, bytes: 88000000, secs: 120,
+            markers: [{ id: 1, t: 41.2, title: "Баг с текстурой" }, { id: 2, t: 97, title: "" }] },
+          { path: "C:\\Videos\\Rewind\\Рабочий стол\\2026-11-11 20-21-02 Запись.mp4", name: "2026-11-11 20-21-02 Запись", kind: "rec", app: "Рабочий стол", time: Date.now() - 90000000, bytes: 10500000, secs: 7.7, markers: [] }],
   taken: [], folder: "C:\\Users\\me\\Videos\\Rewind", version: "0.0.0",
   system: { available: true }, update: { state: "idle" },
 };
@@ -410,6 +427,8 @@ function pageKeys() {
     + keyRow("save_clip", "Сохранить последние " + duration(S.settings.buffer_seconds))
     + keyRow("record", "Начать и остановить запись")
     + keyRow("screenshot", "Скриншот")
+    + keyRow("marker", "Поставить метку")
+    + keyRow("marker_note", "Метка с заголовком")
     + keyRow("buffer", "Включить и выключить буфер")
     + `<div class="note">${note}</div></div>`;
 }
@@ -420,6 +439,9 @@ const ICONS = {
   rename: '<svg viewBox="0 0 16 16"><path d="M10.6 2.8l2.6 2.6-7.4 7.4H3.2v-2.6zM9 4.4l2.6 2.6"/></svg>',
   scissors: '<svg viewBox="0 0 16 16"><circle cx="4.2" cy="12" r="2.2"/><circle cx="11.8" cy="12" r="2.2"/><path d="M5.6 10.2L11.5 2M10.4 10.2L4.5 2"/></svg>',
   pause: '<svg viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
+  resolve: '<svg viewBox="0 0 16 16"><path d="M8 2.5v7.5M4.8 6.8L8 10l3.2-3.2M3 12.5h10"/></svg>',
+  chevron: '<svg viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3"/></svg>',
+  close: '<svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>',
   trash: '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
 };
 let renaming = null; // path of the file whose name is being edited
@@ -447,6 +469,22 @@ function bytes(n) {
   return mb >= 1024 ? (mb / 1024).toFixed(1).replace(".", ",") + " ГБ" : (mb >= 10 ? Math.round(mb) : mb.toFixed(1).replace(".", ",")) + " МБ";
 }
 
+let openMarks = null; // path of the file whose markers are shown
+function markWord(n) {
+  const a = n % 10, b = n % 100;
+  return n + " " + (a === 1 && b !== 11 ? "метка" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "метки" : "меток");
+}
+function markRows(f) {
+  const p = esc(f.path);
+  return `<div class="marks" role="list" aria-label="Метки">` + f.markers.map((m, i) => `
+    <div class="mrow" role="listitem" data-mark="${m.id}" data-path="${p}">
+      <img src="frame?p=${encodeURIComponent(f.path)}&t=${m.t.toFixed(2)}&v=${f.time}" alt="" loading="lazy">
+      <span class="at">${clock(m.t)}</span>
+      <input data-mark-title value="${esc(m.title || "")}" placeholder="Метка ${i + 1} — без заголовка" aria-label="Заголовок метки ${i + 1}" spellcheck="false" maxlength="200">
+      <button class="icon-btn" data-mop="go" aria-label="Обрезать с метки ${i + 1}" title="Открыть здесь">${ICONS.scissors}</button>
+      <button class="icon-btn" data-mop="delete" aria-label="Удалить метку ${i + 1}" title="Удалить метку">${ICONS.close}</button>
+    </div>`).join("") + `</div>`;
+}
 function fileRow(f) {
   const kind = f.kind === "clip" ? "Клип" : f.kind === "rec" ? "Запись" : f.kind === "shot" ? "Скриншот" : "Видео";
   // A name Rewind gave ("2026-11-12 14-03-05 Клип") reads better as "Клип · ELDEN RING";
@@ -458,18 +496,20 @@ function fileRow(f) {
   const p = esc(f.path);
   const head = renaming === f.path
     ? `<input data-rename="${p}" value="${esc(f.name)}" aria-label="Новое имя файла" spellcheck="false">`
-    : `<b title="${esc(f.name)}">${esc(title)}</b>`;
+    : `<span class="title"><b title="${esc(f.name)}">${esc(title)}</b>${f.markers && f.markers.length
+        ? `<button class="pill" data-op="marks" aria-expanded="${openMarks === f.path}" aria-label="Метки: ${markWord(f.markers.length)}">${markWord(f.markers.length)}${ICONS.chevron}</button>` : ""}</span>`;
   return `<div class="file" data-file="${p}">
       <img src="thumb?p=${encodeURIComponent(f.path)}&v=${f.time}" alt="" loading="lazy" onerror="this.outerHTML='<div class=noimg></div>'">
       <div class="info">${head}<span>${esc(detail)}</span></div>
       <div class="acts">
         <button class="icon-btn" data-op="open" aria-label="Открыть: ${esc(f.name)}" title="Открыть">${ICONS.play}</button>
         <button class="icon-btn" data-op="reveal" aria-label="Показать в папке: ${esc(f.name)}" title="Показать в папке">${ICONS.folder}</button>
-        ${f.kind === "shot" ? "" : `<button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>`}
+        ${f.kind === "shot" ? "" : `<button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>
+        <button class="icon-btn" data-op="resolve" aria-label="В Resolve: ${esc(f.name)}" title="В Resolve — в открытый проект, вместе с метками">${ICONS.resolve}</button>`}
         <button class="icon-btn" data-op="rename" aria-label="Переименовать: ${esc(f.name)}" title="Переименовать">${ICONS.rename}</button>
         <button class="icon-btn" data-op="delete" aria-label="В корзину: ${esc(f.name)}" title="В корзину">${ICONS.trash}</button>
       </div>
-    </div>`;
+    </div>${openMarks === f.path && f.markers && f.markers.length ? markRows(f) : ""}`;
 }
 
 function pageFiles() {
@@ -625,6 +665,14 @@ document.addEventListener("click", (e) => {
   if (padLearning()) send({ t: "pad_learn", id: null });
   if (t.dataset.key) { startListening(t.dataset.key); return; }
   if (listening) stopListening();
+  if (t.dataset.mop) {
+    const row = t.closest("[data-mark]"), path = row.dataset.path, id = Number(row.dataset.mark);
+    if (t.dataset.mop === "go") {
+      const f = (S.files || []).find((x) => x.path === path), m = f && f.markers.find((x) => x.id === id);
+      openTrim(path, m ? m.t : 0);
+    } else send({ t: "mark", op: "delete", path, id });
+    return;
+  }
   if (t.dataset.op) { fileAction(t.dataset.op, t.closest("[data-file]").dataset.file); return; }
   if (t.dataset.tab) { tab = t.dataset.tab; if (tab === "files") cmd("files"); render(); }
   else if (t.dataset.toggle) set({ [t.dataset.toggle]: !S.settings[t.dataset.toggle] });
@@ -675,7 +723,7 @@ document.addEventListener("keydown", (e) => {
     send({ t: "pad_learn", id: null });
     return;
   }
-  if (!listening) { if (e.key === "Escape" && !T.path) { if ($("menu")) closeMenu(); else cmd("close"); } return; }
+  if (!listening) { if (e.key === "Escape" && !T.path && !(e.target.closest && e.target.closest("input"))) { if ($("menu")) closeMenu(); else cmd("close"); } return; }
   e.preventDefault();
   if (e.key === "Escape") { stopListening(); return; }
   if (e.key === "Backspace" && !mods(e).length) {
@@ -692,6 +740,7 @@ window.addEventListener("blur", () => { closeMenu(); if (listening) stopListenin
 
 function fileAction(op, path) {
   if (op === "trim") { openTrim(path); return; }
+  if (op === "marks") { openMarks = openMarks === path ? null : path; render(); return; }
   if (op === "rename") {
     renaming = path; render();
     const field = document.querySelector("[data-rename]");
@@ -716,6 +765,33 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("focusout", (e) => {
   if (e.target.dataset && e.target.dataset.rename && renaming) finishRename(e.target, true);
 });
+
+// ---------- marker titles ----------
+function editingMark() { const a = document.activeElement; return !!(a && a.dataset && "markTitle" in a.dataset); }
+function commitMark(field) {
+  const row = field.closest("[data-mark]");
+  const f = (S.files || []).find((x) => x.path === row.dataset.path);
+  const m = f && f.markers.find((x) => x.id === Number(row.dataset.mark));
+  const title = field.value.trim();
+  if (m && title !== (m.title || "")) { m.title = title; send({ t: "mark", op: "title", path: row.dataset.path, id: m.id, title }); }
+}
+document.addEventListener("keydown", (e) => {
+  const field = e.target.dataset && "markTitle" in e.target.dataset ? e.target : null;
+  if (!field) return;
+  if (e.key === "Enter") { e.preventDefault(); field.blur(); }
+  else if (e.key === "Escape") {
+    e.preventDefault();
+    const row = field.closest("[data-mark]"), f = (S.files || []).find((x) => x.path === row.dataset.path);
+    const m = f && f.markers.find((x) => x.id === Number(row.dataset.mark));
+    field.value = m ? m.title || "" : "";
+    field.blur();
+  }
+}, true);
+document.addEventListener("focusout", (e) => {
+  if (!(e.target.dataset && "markTitle" in e.target.dataset)) return;
+  commitMark(e.target);
+  if (stale) setTimeout(() => { if (!editingMark() && !listening && !$("menu")) { stale = false; render(); } }, 0);
+});
 document.addEventListener("dblclick", (e) => {
   const row = e.target.closest("[data-file]");
   if (row && !e.target.closest("button, input")) fileAction("open", row.dataset.file);
@@ -732,15 +808,16 @@ function clock(sec) {
   return m + ":" + r.toFixed(1).padStart(4, "0");
 }
 
-function openTrim(path) {
+function openTrim(path, at) {
   const f = (S.files || []).find((x) => x.path === path);
-  T.path = path; T.dur = f && f.secs ? f.secs : 0; T.a = 0; T.b = T.dur; T.t = 0; T.fallback = false; T.busy = false;
+  T.path = path; T.dur = f && f.secs ? f.secs : 0; T.a = 0; T.b = T.dur; T.t = at || 0; T.fallback = false; T.busy = false;
+  T.marks = f && f.markers ? f.markers.map((m) => m.t) : [];
   closeMenu();
   const name = f ? f.name : path.split("\\").pop().replace(/\.mp4$/i, "");
   $("trim").innerHTML = `
     <div class="stage" id="stage"><span class="wait">Загружаю…</span></div>
     <div class="timeline" id="tl" role="group" aria-label="Шкала обрезки">
-      <div class="bar"></div><div class="sel" id="tl-sel"></div><div class="playhead" id="tl-head"></div>
+      <div class="bar"></div><div class="sel" id="tl-sel"></div><div id="tl-marks"></div><div class="playhead" id="tl-head"></div>
       <button class="knob" id="tl-a" aria-label="Начало"></button><button class="knob" id="tl-b" aria-label="Конец"></button>
     </div>
     <div class="times"><span id="tl-ta"></span><span id="tl-len"></span><span id="tl-tb"></span></div>
@@ -763,6 +840,7 @@ function openTrim(path) {
   v.onloadedmetadata = () => {
     if (!T.dur || Math.abs(v.duration - T.dur) > 0.5) { T.dur = v.duration; T.b = T.dur; }
     $("stage").replaceChildren(v);
+    if (T.t) seekTrim(T.t);
     drawTrim();
   };
   v.ontimeupdate = () => { T.t = v.currentTime; if (!v.paused && T.t >= T.b) { v.pause(); } drawTrim(); };
@@ -806,6 +884,8 @@ function drawTrim() {
   $("tl-sel").style.left = pct(T.a);
   $("tl-sel").style.width = T.dur ? ((T.b - T.a) / T.dur) * 100 + "%" : "0";
   $("tl-head").style.left = pct(T.t);
+  const ticks = (T.marks || []).map((t, i) => `<div class="mk" style="left:${pct(t)}" title="Метка ${i + 1}"></div>`).join("");
+  if ($("tl-marks").dataset.v !== ticks) { $("tl-marks").innerHTML = ticks; $("tl-marks").dataset.v = ticks; }
   $("tl-ta").textContent = "Начало " + clock(T.a);
   $("tl-tb").textContent = "Конец " + clock(T.b);
   $("tl-len").innerHTML = "Длина <b>" + clock(T.b - T.a) + "</b>";
@@ -878,6 +958,9 @@ document.addEventListener("keydown", (e) => {
     ArrowRight: () => seekTrim(T.t + step),
     Home: () => seekTrim(T.a),
     End: () => seekTrim(T.b),
+    // Markers: to the previous / next one.
+    PageUp: () => { const m = (T.marks || []).filter((t) => t < T.t - 0.05); if (m.length) seekTrim(m[m.length - 1]); },
+    PageDown: () => { const m = (T.marks || []).filter((t) => t > T.t + 0.05); if (m.length) seekTrim(m[0]); },
     Enter: () => saveTrim(),
     Escape: () => closeTrim(),
   }[e.key] || ({ KeyI: () => setPoint("a"), BracketLeft: () => setPoint("a"), KeyO: () => setPoint("b"), BracketRight: () => setPoint("b") })[e.code];
@@ -892,10 +975,11 @@ window.rewind = {
     if ($("tr-note")) { $("tr-note").classList.add("bad"); $("tr-note").textContent = "Не получилось: " + r.error; }
     drawTrim();
   },
-  files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening) stale = true; else render(); } },
+  files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening || editingMark()) stale = true; else render(); } },
+  resolved() {},
   update(state) {
     Object.assign(S, state);
-    if (listening || $("menu")) stale = true;
+    if (listening || $("menu") || editingMark()) stale = true;
     else render();
   },
   // Test aid: switch the page from outside.

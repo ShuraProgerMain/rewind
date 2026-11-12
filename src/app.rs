@@ -53,6 +53,8 @@ const WM_UPDATE: u32 = WM_APP + 7;
 const WM_TRIMMED: u32 = WM_APP + 9;
 /// A screenshot has been saved (or failed).
 const WM_SHOT: u32 = WM_APP + 13;
+/// Sending a video to DaVinci Resolve has finished.
+const WM_RESOLVED: u32 = WM_APP + 15;
 // Buttons of the "saved" notification (ids for WM_TOAST_ACTION).
 const ACT_OPEN: usize = 1;
 const ACT_REVEAL: usize = 2;
@@ -68,6 +70,8 @@ const CMD_SAVE: usize = 1;
 const CMD_RECORD: usize = 2;
 const CMD_BUFFER: usize = 3;
 const CMD_SHOT: usize = 4;
+const CMD_MARK: usize = 5;
+const CMD_MARK_NOTE: usize = 6;
 const CMD_OPEN_FOLDER: usize = 10;
 const CMD_SHOW_LAST: usize = 11;
 const CMD_SETTINGS: usize = 12;
@@ -133,6 +137,16 @@ struct App {
     pads: Option<usize>,
     /// Shown under the combination being learned ("needs two buttons").
     pad_hint: String,
+    /// Markers: the last id handed out, how many were placed (in this recording), the one
+    /// waiting for its title box, titles typed, and the files each marker went into.
+    mark_seq: u64,
+    mark_count: u32,
+    mark_note: Option<u64>,
+    mark_titles: std::collections::HashMap<u64, String>,
+    mark_files: std::collections::HashMap<u64, Vec<PathBuf>>,
+    resolve_tx: Sender<Result<String, String>>,
+    resolve_rx: Receiver<Result<String, String>>,
+    resolve_busy: bool,
 }
 
 /// What the settings page shows about updates.
@@ -181,6 +195,22 @@ fn duration_text(secs: u64) -> String {
         _ if secs % 3600 < 60 => format!("{} ч", secs / 3600),
         _ => format!("{} ч {} мин", secs / 3600, secs % 3600 / 60),
     }
+}
+
+/// " · 3 метки" for a notification (nothing without markers).
+fn marks_text(n: usize) -> String {
+    let word = match (n % 10, n % 100) {
+        (1, r) if r != 11 => "метка",
+        (2..=4, r) if !(12..=14).contains(&r) => "метки",
+        _ => "меток",
+    };
+    if n == 0 { String::new() } else { format!(" · {n} {word}") }
+}
+
+/// 12:41 or 1:02:41.
+fn clock_text(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
 fn size_text(bytes: u64) -> String {
@@ -381,6 +411,8 @@ impl App {
             (CMD_RECORD, &keys.record),
             (CMD_BUFFER, &keys.buffer),
             (CMD_SHOT, &keys.screenshot),
+            (CMD_MARK, &keys.marker),
+            (CMD_MARK_NOTE, &keys.marker_note),
         ] {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.hwnd), id as i32);
@@ -403,8 +435,15 @@ impl App {
     /// Hands the gamepad combinations to the pad reader (which runs only when some are set).
     fn configure_pad(&self) {
         let p = &self.settings.pad;
-        let combos = [(CMD_SAVE, &p.save_clip), (CMD_RECORD, &p.record), (CMD_BUFFER, &p.buffer), (CMD_SHOT, &p.screenshot)]
-            .into_iter()
+        let combos = [
+            (CMD_SAVE, &p.save_clip),
+            (CMD_RECORD, &p.record),
+            (CMD_BUFFER, &p.buffer),
+            (CMD_SHOT, &p.screenshot),
+            (CMD_MARK, &p.marker),
+            (CMD_MARK_NOTE, &p.marker_note),
+        ]
+        .into_iter()
             .filter_map(|(id, text)| gamepad::parse(text).map(|mask| (id, mask)))
             .collect();
         gamepad::configure(self.hwnd, combos);
@@ -431,7 +470,7 @@ impl App {
         }
         let text = gamepad::format(mask);
         // One combination, one action: it is taken away from any other.
-        for other in ["save_clip", "record", "buffer", "screenshot"] {
+        for other in ["save_clip", "record", "buffer", "screenshot", "marker", "marker_note"] {
             if let Some(value) = self.settings.pad.get_mut(other) {
                 if *value == text {
                     value.clear();
@@ -485,6 +524,93 @@ impl App {
                 log::line(&format!("screenshot failed: {e}"));
                 self.notify(Tone::Error, "Скриншот не сделан", &e);
             }
+        }
+    }
+
+    /// Asks the engine to mark this moment; `note` opens the title box once it is placed.
+    fn place_mark(&mut self, note: bool) {
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        // Unique across launches and small enough for the page's numbers.
+        self.mark_seq = (now * 1000).max(self.mark_seq + 1);
+        let id = self.mark_seq;
+        if note {
+            self.mark_note = Some(id);
+        }
+        let _ = self.tx.send(Cmd::Mark(id));
+    }
+
+    fn on_marked(&mut self, id: u64, rec_secs: Option<f64>) {
+        self.mark_count += 1;
+        let heading = match rec_secs {
+            Some(secs) => format!("Метка {} · {}", self.mark_count, clock_text(secs)),
+            None => format!("Метка {} · в буфере", self.mark_count),
+        };
+        log::line(&format!("marked {id}: {heading}"));
+        if self.mark_note == Some(id) {
+            self.mark_note = None;
+            crate::notebox::open(self.hwnd, id, &heading);
+        } else if self.settings.notifications {
+            let detail = if rec_secs.is_some() { "Войдёт в запись" } else { "Войдёт в клип, если сохранить буфер" };
+            toast::show(Tone::Info, &heading, detail);
+        }
+    }
+
+    /// A marker's title was typed in the box (or later on the page).
+    fn set_mark_title(&mut self, id: u64, title: &str) {
+        self.mark_titles.insert(id, title.to_string());
+        for file in self.mark_files.get(&id).cloned().unwrap_or_default() {
+            if let Err(e) = crate::marks::set_title(&file, id, title) {
+                log::line(&format!("marker title not saved in {}: {e:#}", file.display()));
+            }
+        }
+        self.push_files();
+    }
+
+    /// Writes the markers of a file that was just saved; returns how many there are.
+    fn store_marks(&mut self, path: &std::path::Path, marks: &[engine::Mark]) -> usize {
+        if marks.is_empty() {
+            return 0;
+        }
+        let list: Vec<crate::marks::Marker> = marks
+            .iter()
+            .map(|m| crate::marks::Marker { id: m.id, t: m.secs, title: self.mark_titles.get(&m.id).cloned().unwrap_or_default() })
+            .collect();
+        for m in marks {
+            self.mark_files.entry(m.id).or_default().push(path.to_path_buf());
+        }
+        if let Err(e) = crate::marks::save(path, &list) {
+            log::line(&format!("markers not saved for {}: {e:#}", path.display()));
+        }
+        list.len()
+    }
+
+    /// Sends a video to DaVinci Resolve on a worker thread; the result comes back as WM_RESOLVED.
+    fn send_to_resolve(&mut self, path: PathBuf) {
+        if self.resolve_busy {
+            return;
+        }
+        self.resolve_busy = true;
+        let (tx, target) = (self.resolve_tx.clone(), self.hwnd.0 as isize);
+        thread::spawn(move || {
+            let result = crate::resolve::send(&path).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(result);
+            unsafe {
+                let _ = PostMessageW(Some(HWND(target as _)), WM_RESOLVED, WPARAM(0), LPARAM(0));
+            }
+        });
+    }
+
+    fn on_resolved(&mut self, result: Result<String, String>) {
+        self.resolve_busy = false;
+        match result {
+            Ok(name) => toast::show(Tone::Good, "Добавлено в Resolve", &format!("Таймлайн «{name}» в папке Rewind")),
+            Err(e) => {
+                log::line(&format!("resolve failed: {e}"));
+                toast::show(Tone::Error, "Не удалось отправить в Resolve", &e);
+            }
+        }
+        if let Some(ui) = &self.ui {
+            ui.eval("window.rewind&&window.rewind.resolved&&window.rewind.resolved()");
         }
     }
 
@@ -685,8 +811,15 @@ impl App {
                 }
                 Err(e) => self.notify(Tone::Error, "Не удалось удалить", &format!("{e:#}")),
             },
+            "resolve" => self.send_to_resolve(path.clone()),
             "rename" => match crate::library::rename(&path, name) {
                 Ok(new) => {
+                    // Titles typed later must reach the file under its new name.
+                    for files in self.mark_files.values_mut() {
+                        for f in files.iter_mut().filter(|f| **f == path) {
+                            *f = new.clone();
+                        }
+                    }
                     if self.last_file.as_ref() == Some(&path) {
                         self.last_file = Some(new);
                     }
@@ -743,6 +876,23 @@ impl App {
             }
             "set" => self.merge_settings(&msg["settings"]),
             "pad_learn" => self.pad_learn(msg["id"].as_str().map(str::to_string)),
+            // Title or removal of one marker of a file, from the Records tab.
+            "mark" => {
+                let path = PathBuf::from(msg["path"].as_str().unwrap_or_default());
+                let id = msg["id"].as_u64().unwrap_or(0);
+                if !crate::library::inside(&path) {
+                    return None;
+                }
+                let result = match msg["op"].as_str().unwrap_or_default() {
+                    "title" => crate::marks::set_title(&path, id, msg["title"].as_str().unwrap_or_default()).map(|_| ()),
+                    "delete" => crate::marks::remove(&path, id),
+                    _ => Ok(()),
+                };
+                if let Err(e) = result {
+                    self.notify(Tone::Error, "Метка не сохранена", &format!("{e:#}"));
+                }
+                self.push_files();
+            }
             "trim" => {
                 let path = PathBuf::from(msg["path"].as_str().unwrap_or_default());
                 let (start, end) = (msg["start"].as_f64().unwrap_or(0.0), msg["end"].as_f64().unwrap_or(0.0));
@@ -759,6 +909,7 @@ impl App {
                 "record" => self.on_command(CMD_RECORD),
                 "buffer" => self.on_command(CMD_BUFFER),
                 "screenshot" => self.on_command(CMD_SHOT),
+                "mark" => self.on_command(CMD_MARK),
                 "open_folder" => self.on_command(CMD_OPEN_FOLDER),
                 "show_last" => self.on_command(CMD_SHOW_LAST),
                 "files" => self.push_files(),
@@ -769,7 +920,7 @@ impl App {
                 }
                 // While a new hotkey is being typed, the old ones must not fire.
                 "hotkeys_pause" => {
-                    for id in [CMD_SAVE, CMD_RECORD, CMD_BUFFER, CMD_SHOT] {
+                    for id in [CMD_SAVE, CMD_RECORD, CMD_BUFFER, CMD_SHOT, CMD_MARK, CMD_MARK_NOTE] {
                         unsafe {
                             let _ = UnregisterHotKey(Some(self.hwnd), id as i32);
                         }
@@ -859,21 +1010,29 @@ impl App {
             }
             Event::RecordingStarted(path) => {
                 self.recording = true;
+                self.mark_count = 0; // markers are numbered within a recording
                 log::line(&format!("recording to {}", path.display()));
                 self.notify(Tone::Record, "Запись началась", "");
             }
-            Event::RecordingSaved { path, secs, bytes } => {
+            Event::RecordingSaved { path, secs, bytes, marks } => {
                 self.recording = false;
-                log::line(&format!("recording saved: {} ({secs:.1} s, {bytes} bytes)", path.display()));
+                log::line(&format!("recording saved: {} ({secs:.1} s, {bytes} bytes, {} marks)", path.display(), marks.len()));
                 self.last_file = Some(path.clone());
-                self.notify_saved("Запись сохранена", &format!("{} · {}", duration_text(secs.round() as u64), size_text(bytes)));
+                let n = self.store_marks(&path, &marks);
+                self.notify_saved("Запись сохранена", &format!("{} · {}{}", duration_text(secs.round() as u64), size_text(bytes), marks_text(n)));
                 self.last_file = Some(path);
             }
-            Event::ClipSaved { path, secs, bytes, ms } => {
-                log::line(&format!("clip saved: {} ({secs:.1} s, {bytes} bytes, {ms} ms)", path.display()));
+            Event::ClipSaved { path, secs, bytes, ms, marks } => {
+                log::line(&format!("clip saved: {} ({secs:.1} s, {bytes} bytes, {ms} ms, {} marks)", path.display(), marks.len()));
                 self.last_file = Some(path.clone());
-                self.notify_saved("Клип сохранён", &format!("Последние {} · {}", duration_text(secs.round() as u64), size_text(bytes)));
+                let n = self.store_marks(&path, &marks);
+                self.notify_saved("Клип сохранён", &format!("Последние {} · {}{}", duration_text(secs.round() as u64), size_text(bytes), marks_text(n)));
                 self.last_file = Some(path);
+            }
+            Event::Marked { id, rec_secs } => self.on_marked(id, rec_secs),
+            Event::NothingToMark => {
+                self.mark_note = None;
+                self.notify(Tone::Info, "Метку некуда поставить", "Запись и буфер повтора выключены");
             }
             Event::NothingToSave => {
                 self.notify(Tone::Info, "Нечего сохранять", "Буфер повтора выключен или ещё пуст");
@@ -913,6 +1072,8 @@ impl App {
             let rec = if self.recording { "Остановить запись" } else { "Начать запись" };
             add(menu, MF_STRING, CMD_RECORD, &with_key(rec, &s.hotkeys.record));
             add(menu, MF_STRING, CMD_SHOT, &with_key("Скриншот", &s.hotkeys.screenshot));
+            let mark_flags = if self.buffer_on || self.recording { MF_STRING } else { MF_STRING | MF_GRAYED };
+            add(menu, mark_flags, CMD_MARK, &with_key("Поставить метку", &s.hotkeys.marker));
             add(menu, check(self.buffer_on), CMD_BUFFER, &with_key("Буфер повтора", &s.hotkeys.buffer));
             add(menu, MF_SEPARATOR, 0, "");
 
@@ -973,6 +1134,8 @@ impl App {
             CMD_SAVE => drop(self.tx.send(Cmd::SaveClip)),
             CMD_RECORD => drop(self.tx.send(Cmd::ToggleRecord)),
             CMD_SHOT => self.start_shot(),
+            CMD_MARK => self.place_mark(false),
+            CMD_MARK_NOTE => self.place_mark(true),
             CMD_BUFFER => {
                 if self.settings.buffer_seconds == 0 {
                     self.settings.buffer_seconds = 600;
@@ -1034,6 +1197,8 @@ impl App {
             "record" => self.on_command(CMD_RECORD),
             "buffer" => self.on_command(CMD_BUFFER),
             "screenshot" => self.on_command(CMD_SHOT),
+            "mark" => self.on_command(CMD_MARK),
+            "mark_note" => self.on_command(CMD_MARK_NOTE),
             "quit" => self.on_command(CMD_QUIT),
             // Lets tests press menu items: "menu 201".
             other => {
@@ -1044,6 +1209,11 @@ impl App {
                     unsafe {
                         let _ = PostMessageW(Some(self.hwnd), gamepad::WM_PAD, WPARAM(id), LPARAM(0));
                     }
+                    return;
+                }
+                // Test hook: types a title into the open title box and presses Enter.
+                if let Some(text) = other.strip_prefix("note_submit ") {
+                    crate::notebox::submit(text);
                     return;
                 }
                 if let Some(mask) = other.strip_prefix("pad_learned ").and_then(|n| n.trim().parse::<usize>().ok()) {
@@ -1250,6 +1420,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|app| {
                 app.pads = Some(wparam.0);
                 app.push_state();
+            });
+            LRESULT(0)
+        }
+        crate::notebox::WM_NOTE_DONE => {
+            for (id, title) in crate::notebox::take() {
+                log::line(&format!("title box for {id} closed: {}", title.as_deref().map_or("no title".to_string(), |t| format!("\"{t}\""))));
+                if let Some(title) = title {
+                    with_app(|app| app.set_mark_title(id, &title));
+                }
+            }
+            LRESULT(0)
+        }
+        WM_RESOLVED => {
+            with_app(|app| {
+                while let Ok(result) = app.resolve_rx.try_recv() {
+                    app.on_resolved(result);
+                }
             });
             LRESULT(0)
         }
@@ -1466,6 +1653,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
     let (update_tx, update_rx) = channel();
     let (trim_tx, trim_rx) = channel();
     let (shot_tx, shot_rx) = channel();
+    let (resolve_tx, resolve_rx) = channel();
     let waiting = updater::staged(&exe);
     let mut app = App {
         hwnd,
@@ -1509,6 +1697,14 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         pad_learning: None,
         pads: None,
         pad_hint: String::new(),
+        mark_seq: 0,
+        mark_count: 0,
+        mark_note: None,
+        mark_titles: Default::default(),
+        mark_files: Default::default(),
+        resolve_tx,
+        resolve_rx,
+        resolve_busy: false,
     };
     if first_run {
         app.save_settings(); // so the file exists for editing

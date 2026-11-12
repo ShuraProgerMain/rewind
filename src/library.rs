@@ -44,6 +44,8 @@ pub struct Entry {
     pub time: u64,
     pub bytes: u64,
     pub secs: f64,
+    /// Marked moments (from `<name>.markers.json`).
+    pub markers: Vec<crate::marks::Marker>,
 }
 
 /// Turns a program name (or a name the user typed) into something every file system accepts.
@@ -141,7 +143,8 @@ pub fn list(limit: usize) -> Vec<Entry> {
                 Some(parent) if parent != root => parent.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
                 _ => name.split_once(" — ").map(|(_, app)| app.to_string()).unwrap_or_default(),
             };
-            Entry { path: path.to_string_lossy().to_string(), name, kind, app, time: stamp(&meta), bytes: meta.len(), secs }
+            let markers = if picture { Vec::new() } else { crate::marks::load(&path) };
+            Entry { path: path.to_string_lossy().to_string(), name, kind, app, time: stamp(&meta), bytes: meta.len(), secs, markers }
         })
         .collect()
 }
@@ -151,8 +154,13 @@ pub fn recycle(path: &Path) -> Result<()> {
     if !inside(path) {
         bail!("not a file in the recordings folder");
     }
-    let mut from: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().collect();
-    from.extend([0, 0]); // the list ends with two zeros
+    // The video and its marker files go together; the list is zero-separated and ends with two zeros.
+    let mut from: Vec<u16> = Vec::new();
+    for p in std::iter::once(path.to_path_buf()).chain(crate::marks::companions(path)) {
+        from.extend(p.as_os_str().to_string_lossy().encode_utf16());
+        from.push(0);
+    }
+    from.push(0);
     let mut op = SHFILEOPSTRUCTW {
         wFunc: FO_DELETE,
         pFrom: PCWSTR(from.as_ptr()),
@@ -180,7 +188,16 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf> {
     if target.exists() {
         bail!("a file named «{stem}» is already there");
     }
+    let markers = crate::marks::load(path);
+    let companions = crate::marks::companions(path);
     std::fs::rename(path, &target)?;
+    // The marker files follow; the timeline file names the video, so it is written anew.
+    for old in companions {
+        let _ = std::fs::remove_file(old);
+    }
+    if let Err(e) = crate::marks::save(&target, &markers) {
+        crate::log::line(&format!("markers not moved to {}: {e:#}", target.display()));
+    }
     Ok(target)
 }
 
@@ -412,6 +429,15 @@ pub fn trim(path: &Path, start: f64, end: f64) -> Result<Trimmed> {
         let _ = std::fs::remove_file(&out); // never leave half a file behind
     }
     let (s, e) = result?;
+    // Markers inside the kept part come along, shifted to the new start.
+    let kept: Vec<crate::marks::Marker> = crate::marks::load(path)
+        .into_iter()
+        .filter(|m| m.t >= s - 0.001 && m.t <= e + 0.001)
+        .map(|m| crate::marks::Marker { t: (m.t - s).max(0.0), ..m })
+        .collect();
+    if let Err(e) = crate::marks::save(&out, &kept) {
+        crate::log::line(&format!("markers not copied to the trimmed file: {e:#}"));
+    }
     Ok(Trimmed { path: out.to_string_lossy().to_string(), start: s, end: e })
 }
 

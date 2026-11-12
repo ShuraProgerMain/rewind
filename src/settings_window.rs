@@ -43,7 +43,7 @@ use wry::{Theme, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 // Design size in 96-dpi pixels.
 const WIDTH: i32 = 600;
-const HEIGHT: i32 = 476;
+const HEIGHT: i32 = 524;
 
 const PAGE: &str = include_str!("../ui/index.html");
 const FONT: &[u8] = include_bytes!("../ui/Inter.ttf");
@@ -254,7 +254,7 @@ impl SettingsWindow {
                             let at = value("t=").and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
                             let picture = value("p=").and_then(|f| crate::library::frame_at(Path::new(&f), at).ok());
                             let response = match picture {
-                                Some(bytes) => Response::builder().header("Content-Type", "image/bmp").body(Cow::Owned(bytes)),
+                                Some(bytes) => Response::builder().header("Content-Type", "image/bmp").header("Cache-Control", "max-age=86400").body(Cow::Owned(bytes)),
                                 None => Response::builder().status(404).body(Cow::Borrowed(&[][..])),
                             };
                             responder.respond(response.expect("response"));

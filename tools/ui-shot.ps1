@@ -2,7 +2,7 @@
 # The window is put above everything for the moment of the shot, so it does not matter
 # what the user is doing in other windows.
 # Usage: ui-shot.ps1 -Out file.png [-Margin 30]
-param([Parameter(Mandatory)] [string]$Out, [int]$Margin = 30, [switch]$Activate)
+param([Parameter(Mandatory)] [string]$Out, [int]$Margin = 30, [switch]$Activate, [string]$Class = 'RewindSettings')
 Add-Type -AssemblyName System.Drawing
 Add-Type -Namespace W -Name U -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern System.IntPtr FindWindowW(string cls, string title);
@@ -15,7 +15,7 @@ Add-Type -Namespace W -Name U -MemberDefinition @'
 public struct RECT { public int L, T, R, B; }
 '@
 [void][W.U]::SetProcessDPIAware()
-$h = [W.U]::FindWindowW('RewindSettings', [NullString]::Value)
+$h = [W.U]::FindWindowW($Class, [NullString]::Value)
 if ($h -eq [IntPtr]::Zero) { 'settings window not found'; exit 1 }
 $flags = 0x0001 -bor 0x0002 -bor 0x0010   # no size, no move, no activate
 [void][W.U]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, $flags)   # topmost

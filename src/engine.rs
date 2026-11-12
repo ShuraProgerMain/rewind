@@ -80,6 +80,8 @@ pub enum Cmd {
     SaveClip,
     ToggleRecord,
     ToggleBuffer,
+    /// Mark this moment (the id comes back in Event::Marked and in the saved files).
+    Mark(u64),
     /// Apply new settings. A running pipeline is restarted (the buffer starts over, an
     /// ongoing recording is finalized first).
     SetConfig(Box<Config>),
@@ -98,8 +100,12 @@ pub enum Event {
     /// The replay buffer was given up on after repeated failures.
     BufferStopped,
     RecordingStarted(PathBuf),
-    RecordingSaved { path: PathBuf, secs: f64, bytes: u64 },
-    ClipSaved { path: PathBuf, secs: f64, bytes: u64, ms: u128 },
+    RecordingSaved { path: PathBuf, secs: f64, bytes: u64, marks: Vec<Mark> },
+    ClipSaved { path: PathBuf, secs: f64, bytes: u64, ms: u128, marks: Vec<Mark> },
+    /// A moment was marked; `rec_secs` is its place in the running recording, if any.
+    Marked { id: u64, rec_secs: Option<f64> },
+    /// "Mark" was pressed while nothing is being captured.
+    NothingToMark,
     /// "Save" was pressed while the replay buffer is off or still empty.
     NothingToSave,
     /// Periodic numbers for the console (only with `verbose`).
@@ -108,6 +114,24 @@ pub enum Event {
 }
 
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// A marked moment inside a saved file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub id: u64,
+    /// Seconds from the start of the file.
+    pub secs: f64,
+}
+
+/// Marks that fall inside a file that starts at `start_us` and lasts `secs`.
+fn marks_in(marks: &[(u64, i64)], start_us: Option<i64>, secs: f64) -> Vec<Mark> {
+    let Some(start) = start_us else { return Vec::new() };
+    marks
+        .iter()
+        .map(|&(id, at)| Mark { id, secs: (at - start) as f64 / 1e6 })
+        .filter(|m| m.secs >= 0.0 && m.secs <= secs + 0.05)
+        .collect()
+}
 
 enum Exit {
     Quit,
@@ -119,7 +143,10 @@ enum WMsg {
     Pkt(Pkt),
     StartRec(PathBuf),
     StopRec,
-    Save(Vec<Pkt>, PathBuf),
+    /// A mark for the running recording: id and moment (pipeline clock, us).
+    Mark(u64, i64),
+    /// Packets for a clip, its file, and the marks that may fall inside it.
+    Save(Vec<Pkt>, PathBuf, Vec<(u64, i64)>),
     Quit,
 }
 
@@ -145,6 +172,7 @@ pub fn run(mut cfg: Config, rx: Receiver<Cmd>, emit: Emit) {
                 }
                 Ok(Cmd::ToggleRecord) => st.want_rec = true,
                 Ok(Cmd::SaveClip) => emit(Event::NothingToSave),
+                Ok(Cmd::Mark(_)) => emit(Event::NothingToMark),
                 Ok(Cmd::SetConfig(c)) => cfg = *c,
                 Ok(Cmd::Quit) | Err(_) => return,
             }
@@ -247,6 +275,9 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
     // queue), so the clip is cut once the picture of that moment has come out. Holds the
     // moment of the press (pipeline clock, us) and the latest tick to give up waiting at.
     let mut pending_save: Option<(i64, i64)> = None;
+    // Marked moments still inside the buffer (or the recording): id and pipeline time, us.
+    let mut marks: Vec<(u64, i64)> = Vec::new();
+    let mut rec_started_us: i64 = 0;
 
     // Counters for the periodic status line.
     let (mut n_new, mut n_dup, mut n_skipped, mut n_bytes) = (0u32, 0u32, 0i64, 0usize);
@@ -257,6 +288,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
             // Start/stop requests that arrived while the pipeline was down or since the last tick.
             if st.want_rec != recording {
                 if st.want_rec {
+                    rec_started_us = (last_idx + 1) * 1_000_000 / cfg.fps as i64;
                     let path = out_path(cfg, "Запись", "mp4")?;
                     let _ = wtx.send(WMsg::StartRec(path));
                     force_key = true; // the file must begin with a keyframe: make one right now
@@ -288,6 +320,17 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                         }
                     }
                     Cmd::ToggleRecord => st.want_rec = !st.want_rec,
+                    Cmd::Mark(id) => {
+                        let at = idx * 1_000_000 / cfg.fps as i64;
+                        marks.push((id, at));
+                        // Forget marks that are older than anything the buffer could still save.
+                        marks.retain(|&(_, t)| t >= at - span_us - 10_000_000);
+                        if recording {
+                            let _ = wtx.send(WMsg::Mark(id, at));
+                        }
+                        let rec_secs = recording.then(|| (at - rec_started_us).max(0) as f64 / 1e6);
+                        emit(Event::Marked { id, rec_secs });
+                    }
                     Cmd::ToggleBuffer => {
                         st.buffer_on = !st.buffer_on && cfg.buffer_secs > 0;
                         ring.clear();
@@ -341,7 +384,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                     if pk.is_empty() {
                         emit(Event::NothingToSave);
                     } else {
-                        let _ = wtx.send(WMsg::Save(pk, out_path(cfg, "Клип", "mp4")?));
+                        let _ = wtx.send(WMsg::Save(pk, out_path(cfg, "Клип", "mp4")?, marks.clone()));
                     }
                 }
             }
@@ -390,12 +433,15 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
     struct Rec {
         mux: Muxer,
         path: PathBuf,
+        marks: Vec<(u64, i64)>,
     }
     let mut rec: Option<Rec> = None;
     let finish = |r: Rec| {
         let (frames, bytes) = (r.mux.frames, r.mux.bytes);
+        let secs = frames as f64 / fps as f64;
+        let marks = marks_in(&r.marks, r.mux.start_us, secs);
         match r.mux.finish() {
-            Ok(()) => emit(Event::RecordingSaved { path: r.path, secs: frames as f64 / fps as f64, bytes }),
+            Ok(()) => emit(Event::RecordingSaved { path: r.path, secs, bytes, marks }),
             Err(e) => emit(Event::Error(format!("could not finalize the recording: {e:#}"))),
         }
     };
@@ -412,33 +458,42 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
             WMsg::StartRec(path) => match Muxer::create(&path, &infos, true) {
                 Ok(mux) => {
                     emit(Event::RecordingStarted(path.clone()));
-                    rec = Some(Rec { mux, path });
+                    rec = Some(Rec { mux, path, marks: Vec::new() });
                 }
                 Err(e) => emit(Event::Error(format!("cannot start recording: {e:#}"))),
             },
+            WMsg::Mark(id, at) => {
+                if let Some(r) = rec.as_mut() {
+                    r.marks.push((id, at));
+                }
+            }
             WMsg::StopRec => {
                 if let Some(r) = rec.take() {
                     finish(r);
                 }
             }
-            WMsg::Save(packets, path) => {
+            WMsg::Save(packets, path, marks) => {
                 let t = Instant::now();
-                let res: Result<(u64, u64)> = (|| {
+                let res: Result<(u64, u64, Option<i64>)> = (|| {
                     let mut m = Muxer::create(&path, &infos, false)?;
                     for p in &packets {
                         m.write(p)?;
                     }
-                    let out = (m.frames, m.bytes);
+                    let out = (m.frames, m.bytes, m.start_us);
                     m.finish()?;
                     Ok(out)
                 })();
                 match res {
-                    Ok((frames, bytes)) => emit(Event::ClipSaved {
-                        path,
-                        secs: frames as f64 / fps as f64,
-                        bytes,
-                        ms: t.elapsed().as_millis(),
-                    }),
+                    Ok((frames, bytes, start_us)) => {
+                        let secs = frames as f64 / fps as f64;
+                        emit(Event::ClipSaved {
+                            path,
+                            secs,
+                            bytes,
+                            ms: t.elapsed().as_millis(),
+                            marks: marks_in(&marks, start_us, secs),
+                        })
+                    }
                     Err(e) => emit(Event::Error(format!("could not save the clip: {e:#}"))),
                 }
             }

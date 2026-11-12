@@ -229,13 +229,15 @@ fn print_event(ev: Event) {
         Event::Buffer(on) => println!("replay buffer {}", if on { "on" } else { "off" }),
         Event::BufferStopped => eprintln!("giving up; replay buffer turned off"),
         Event::RecordingStarted(path) => println!("[rec] recording to {}", path.display()),
-        Event::RecordingSaved { path, secs, bytes } => {
+        Event::RecordingSaved { path, secs, bytes, .. } => {
             println!("[rec] saved {} ({secs:.1} s, {:.1} MB)", path.display(), bytes as f64 / MB)
         }
-        Event::ClipSaved { path, secs, bytes, ms } => {
+        Event::ClipSaved { path, secs, bytes, ms, .. } => {
             println!("[clip] saved {} ({secs:.1} s, {:.1} MB) in {ms} ms", path.display(), bytes as f64 / MB)
         }
         Event::NothingToSave => println!("replay buffer is off or empty, nothing to save"),
+        Event::Marked { id, rec_secs } => println!("[mark] {id} at {rec_secs:?}"),
+        Event::NothingToMark => println!("nothing is being captured, no mark placed"),
         Event::Stat(text) => println!("[stat] {text}"),
         Event::Error(text) => eprintln!("error: {text}"),
     }

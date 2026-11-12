@@ -25,6 +25,8 @@ pub struct Muxer {
     /// Set by the first packet, which has to be a video keyframe.
     started: bool,
     header_written: bool,
+    /// The moment (pipeline clock, microseconds) that is zero in the file.
+    pub start_us: Option<i64>,
     pub bytes: u64,
     pub frames: u64,
 }
@@ -40,6 +42,7 @@ impl Muxer {
             pkt: null_mut(),
             tracks: Vec::new(),
             started: false,
+            start_us: None,
             header_written: false,
             bytes: 0,
             frames: 0,
@@ -107,6 +110,7 @@ impl Muxer {
             for (i, t) in self.tracks.iter_mut().enumerate() {
                 t.base = if i == 0 { video_base } else { unsafe { av_rescale_q(start_us, us, t.src_tb) } };
             }
+            self.start_us = Some(start_us);
         }
         let Track { src_tb, dst_tb, base } = self.tracks[idx];
         if p.pts < base || p.dts < base {

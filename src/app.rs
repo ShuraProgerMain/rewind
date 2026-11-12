@@ -337,6 +337,12 @@ impl App {
             "settings": self.settings,
             "monitors": monitors,
             "windows": windows,
+            // Programs with a window, for "sound only from this program".
+            "apps": sources::apps()
+                .into_iter()
+                .filter(|a| a.pid != std::process::id())
+                .map(|a| json!({ "exe": a.exe, "name": a.name }))
+                .collect::<Vec<_>>(),
             "status": { "buffer_on": self.buffer_on, "recording": self.recording, "has_last": self.last_file.is_some() },
             "taken": self.taken,
             "folder": self.settings.output_dir().display().to_string(),
@@ -463,6 +469,8 @@ impl App {
                 }
             }
             "set" => self.merge_settings(&msg["settings"]),
+            // Diagnostics from the page (test scripts), shortened.
+            "log" => log::line(&format!("page: {}", msg["text"].as_str().unwrap_or("").chars().take(300).collect::<String>())),
             "cmd" => match msg["name"].as_str()? {
                 "save" => self.on_command(CMD_SAVE),
                 "record" => self.on_command(CMD_RECORD),
@@ -663,7 +671,7 @@ impl App {
             add(menu, MF_POPUP, length.0 as usize, "Длина буфера");
 
             let sound = CreatePopupMenu().unwrap_or_default();
-            add(sound, check(s.system_sound), CMD_SOUND, "Звук системы");
+            add(sound, check(s.system_sound), CMD_SOUND, "Звук программ");
             add(sound, check(s.microphone), CMD_MIC, "Микрофон");
             add(menu, MF_POPUP, sound.0 as usize, "Звук");
             add(menu, check(s.notifications), CMD_NOTIFY, "Уведомления");

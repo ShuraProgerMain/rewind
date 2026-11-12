@@ -13,8 +13,17 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use windows::core::GUID;
+use windows::core::{Interface, GUID};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{IAgileObject, IAgileObject_Impl, BLOB};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Variant::VT_BLOB;
 use windows::Win32::Media::Audio::{
+    ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
@@ -38,13 +47,45 @@ const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 const SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// Everything played through the default output device.
     System,
     /// The default recording device.
     Mic,
+    /// Only what one program (and the processes it started) plays.
+    App(AppTarget),
 }
+
+/// Which program to take the sound from. Resolved to a process again and again, so a game
+/// that is restarted is picked up without restarting the recording.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppTarget {
+    /// The program that owns this window.
+    Window(isize),
+    /// The first running process with this exe name.
+    Exe(String),
+}
+
+impl AppTarget {
+    fn pid(&self) -> Option<u32> {
+        match self {
+            AppTarget::Window(hwnd) => crate::sources::window_pid(*hwnd),
+            AppTarget::Exe(exe) => crate::sources::find_process(exe),
+        }
+    }
+}
+
+/// Signals an event when Windows has finished activating a process audio client.
+#[windows_core::implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
+struct Activated(isize);
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
+    fn ActivateCompleted(&self, _operation: windows_core::Ref<IActivateAudioInterfaceAsyncOperation>) -> windows_core::Result<()> {
+        unsafe { SetEvent(HANDLE(self.0 as _)) }
+    }
+}
+impl IAgileObject_Impl for Activated_Impl {}
 
 /// AAC encoder for one track, plus the converter from whatever the device delivers.
 pub struct AacEncoder {
@@ -114,7 +155,7 @@ impl AacEncoder {
         Ok(e)
     }
 
-    pub fn info(&self, title: &'static str) -> Result<Arc<StreamInfo>> {
+    pub fn info(&self, title: String) -> Result<Arc<StreamInfo>> {
         unsafe {
             let par = avcodec_parameters_alloc();
             if par.is_null() {
@@ -273,8 +314,11 @@ impl Drop for Device {
     }
 }
 
-unsafe fn default_id(enumerator: &IMMDeviceEnumerator, kind: Kind) -> Option<String> {
-    let flow = if kind == Kind::System { eRender } else { eCapture };
+unsafe fn default_id(enumerator: &IMMDeviceEnumerator, kind: &Kind) -> Option<String> {
+    if let Kind::App(target) = kind {
+        return target.pid().map(|pid| format!("pid:{pid}"));
+    }
+    let flow = if *kind == Kind::System { eRender } else { eCapture };
     let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).ok()?;
     let raw = device.GetId().ok()?;
     let id = raw.to_string().ok();
@@ -282,8 +326,79 @@ unsafe fn default_id(enumerator: &IMMDeviceEnumerator, kind: Kind) -> Option<Str
     id
 }
 
-unsafe fn open(enumerator: &IMMDeviceEnumerator, kind: Kind, enc: &mut AacEncoder) -> Result<Device> {
-    let flow = if kind == Kind::System { eRender } else { eCapture };
+/// Sound of one process and its children ("process loopback", Windows 10 2004 and later).
+/// This kind of client has no mix format of its own: it is asked for 48 kHz float stereo.
+unsafe fn open_app(target: &AppTarget, enc: &mut AacEncoder) -> Result<Device> {
+    let Some(pid) = target.pid() else { bail!("the program is not running") };
+    let params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: pid,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    };
+    // The blob points at `params` on this stack. PROPVARIANT's destructor would try to free
+    // it (PropVariantClear), so it must never run: ManuallyDrop.
+    let mut prop = std::mem::ManuallyDrop::new(PROPVARIANT::default());
+    {
+        let inner = &mut *prop.Anonymous.Anonymous;
+        inner.vt = VT_BLOB;
+        inner.Anonymous.blob = BLOB {
+            cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+            pBlobData: &params as *const _ as *mut u8,
+        };
+    }
+    let event = CreateEventW(None, false, false, None)?;
+    let handler: IActivateAudioInterfaceCompletionHandler = Activated(event.0 as isize).into();
+    let started = ActivateAudioInterfaceAsync(
+        windows::core::w!("VAD\\Process_Loopback"),
+        &IAudioClient::IID,
+        Some(&*prop),
+        &handler,
+    );
+    let operation = match started {
+        Ok(op) => op,
+        Err(e) => {
+            let _ = CloseHandle(event);
+            return Err(e.into());
+        }
+    };
+    let waited = WaitForSingleObject(event, 5000);
+    let _ = CloseHandle(event);
+    if waited != WAIT_OBJECT_0 {
+        bail!("Windows did not answer the request for the program's sound");
+    }
+    let mut result = windows::core::HRESULT(0);
+    let mut unknown: Option<windows::core::IUnknown> = None;
+    operation.GetActivateResult(&mut result, &mut unknown)?;
+    result.ok()?;
+    let client: IAudioClient = unknown.ok_or_else(|| anyhow::anyhow!("no audio client"))?.cast()?;
+
+    const CHANNELS: u32 = 2;
+    let want = WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
+        nChannels: CHANNELS as u16,
+        nSamplesPerSec: RATE as u32,
+        nAvgBytesPerSec: RATE as u32 * CHANNELS * 4,
+        nBlockAlign: (CHANNELS * 4) as u16,
+        wBitsPerSample: 32,
+        cbSize: 0,
+    };
+    let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 5_000_000, 0, &want, None)?;
+    enc.set_input(RATE as u32, CHANNELS, 0)?;
+    let capture: IAudioCaptureClient = client.GetService()?;
+    client.Start()?;
+    Ok(Device { client, capture, id: format!("pid:{pid}"), rate: RATE as u32 })
+}
+
+unsafe fn open(enumerator: &IMMDeviceEnumerator, kind: &Kind, enc: &mut AacEncoder) -> Result<Device> {
+    if let Kind::App(target) = kind {
+        return open_app(target, enc);
+    }
+    let flow = if *kind == Kind::System { eRender } else { eCapture };
     let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole)?;
     let raw = device.GetId()?;
     let id = raw.to_string().unwrap_or_default();
@@ -302,7 +417,7 @@ unsafe fn open(enumerator: &IMMDeviceEnumerator, kind: Kind, enc: &mut AacEncode
         (wf.wFormatTag == WAVE_FORMAT_IEEE_FLOAT, 0)
     };
 
-    let mut flags = if kind == Kind::System { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
+    let mut flags = if *kind == Kind::System { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
     const BUFFER_100NS: i64 = 5_000_000; // half a second of headroom between our wake-ups
     let result = if is_float && wf.wBitsPerSample == 32 {
         let r = client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_100NS, 0, mix, None);
@@ -430,24 +545,28 @@ fn capture_thread(kind: Kind, mut enc: AacEncoder, clock: Clock, tx: Sender<Pkt>
         while !stop.load(Ordering::Relaxed) {
             if let Some(en) = &enumerator {
                 if dev.is_none() && Instant::now() >= open_at {
-                    match open(en, kind, &mut enc) {
+                    match open(en, &kind, &mut enc) {
                         Ok(d) => {
                             dev = Some(d);
                             complained = false;
                         }
                         Err(e) => {
                             if !complained {
-                                crate::log::line(&format!("audio {kind:?}: no device ({e:#}); the track stays silent"));
+                                crate::log::line(&format!("audio {kind:?}: no source ({e:#}); the track stays silent"));
                                 complained = true;
                             }
-                            open_at = Instant::now() + Duration::from_secs(2);
+                            // A program that is not running yet is looked for often, so a game's
+                            // first sounds after launch are not lost; devices less often.
+                            let wait = if matches!(kind, Kind::App(_)) { 500 } else { 2000 };
+                            open_at = Instant::now() + Duration::from_millis(wait);
                         }
                     }
                 }
                 // Follow the default device when the user switches it (headphones, etc.).
                 if checked.elapsed() >= Duration::from_secs(2) {
                     checked = Instant::now();
-                    if dev.as_ref().is_some_and(|d| default_id(en, kind).as_deref() != Some(d.id.as_str())) {
+                    // ...or the program whose sound we take was restarted or closed.
+                    if dev.as_ref().is_some_and(|d| default_id(en, &kind).as_deref() != Some(d.id.as_str())) {
                         dev = None;
                         open_at = Instant::now();
                         continue;

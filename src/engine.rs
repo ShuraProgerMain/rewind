@@ -20,12 +20,30 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-use crate::audio::{AacEncoder, AudioTrack, Clock, Kind};
+use crate::audio::{AacEncoder, AppTarget, AudioTrack, Clock, Kind};
 use crate::capture::{Capture, Source};
 use crate::d3d::create_gpu;
 use crate::encoder::{Encoder, Pkt, StreamInfo, VideoCfg};
 use crate::mux::Muxer;
 use crate::ring::Ring;
+
+/// Where the program sound comes from.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SoundFrom {
+    /// Everything played on the computer.
+    All,
+    /// Only the program whose window is being recorded.
+    Source,
+    /// Only this program (and what it started), wherever its window is.
+    App { exe: String, name: String },
+}
+
+impl Default for SoundFrom {
+    fn default() -> Self {
+        SoundFrom::All
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -44,6 +62,8 @@ pub struct Config {
     pub cursor: bool,
     /// Record what plays through the default output device (own track).
     pub audio_system: bool,
+    /// Where the "system sound" track comes from: everything, or one program.
+    pub audio_from: SoundFrom,
     /// Record the default microphone (own track).
     pub audio_mic: bool,
     /// Bitrate of each sound track, bits per second.
@@ -184,9 +204,19 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
     // Track 0 is the picture; sound tracks follow in a fixed order.
     let mut infos = vec![enc.info()?];
     let mut sound: Vec<(Kind, AacEncoder)> = Vec::new();
-    for (on, kind, title) in
-        [(cfg.audio_system, Kind::System, "System sound"), (cfg.audio_mic, Kind::Mic, "Microphone")]
-    {
+    let (system, system_title) = match &cfg.audio_from {
+        SoundFrom::All => (Kind::System, "System sound".to_string()),
+        // "The recorded window": its program when a window is recorded, else everything.
+        SoundFrom::Source => match cfg.source {
+            Source::Window(hwnd) => {
+                let name = crate::sources::app_of_window(hwnd).map(|a| a.name).unwrap_or_else(|| "App".into());
+                (Kind::App(AppTarget::Window(hwnd)), format!("Sound: {name}"))
+            }
+            Source::Monitor(_) => (Kind::System, "System sound".to_string()),
+        },
+        SoundFrom::App { exe, name } => (Kind::App(AppTarget::Exe(exe.clone())), format!("Sound: {name}")),
+    };
+    for (on, kind, title) in [(cfg.audio_system, system, system_title), (cfg.audio_mic, Kind::Mic, "Microphone".to_string())] {
         if on {
             let aac = AacEncoder::new(infos.len() as u8, cfg.audio_bitrate)?;
             infos.push(aac.info(title)?);

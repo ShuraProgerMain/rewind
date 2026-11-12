@@ -149,7 +149,8 @@ let S = {
   settings: { source: { type: "primary" }, crop: null, fps: 60, codec: "hevc", quality: 20, max_mbit: 100,
     buffer_seconds: 600, buffer_memory_mb: 4096, output_dir: "", cursor: true, system_sound: true, microphone: true,
     audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8" }, notifications: true },
-  monitors: [{ device: "\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
+  apps: [{ exe: "eldenring.exe", name: "ELDEN RING" }, { exe: "telegram.exe", name: "Telegram Desktop" }],
+  monitors: [{ device:"\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
   windows: ["Telegram", "Obsidian"],
   status: { buffer_on: true, recording: false, has_last: false },
   taken: [], folder: "C:\\Users\\me\\Videos\\Rewind", version: "0.0.0",
@@ -187,7 +188,12 @@ function popup(id, items, current) {
   const cur = items.find((i) => i.value !== undefined && same(i.value, current));
   return `<button class="popup" data-popup="${id}"><span>${esc(cur ? cur.label : "—")}</span>${CHEVRONS}</button>`;
 }
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Compares values as data: objects from the program arrive with their keys in another order
+// ({exe, name, type} vs {type, exe, name}), so key order must not matter.
+const canon = (v) => v && typeof v === "object"
+  ? (Array.isArray(v) ? "[" + v.map(canon).join(",") + "]" : "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}")
+  : JSON.stringify(v);
+const same = (a, b) => canon(a) === canon(b);
 const MENUS = {};
 function openMenu(button) {
   const { items, current, pick } = MENUS[button.dataset.popup];
@@ -207,7 +213,11 @@ function openMenu(button) {
       el.setAttribute("role", "menuitemradio");
       el.setAttribute("aria-checked", on ? "true" : "false");
       el.setAttribute("aria-label", it.label);
-      el.onmouseup = () => { closeMenu(); pick(it.value); };
+      // Release picks, as in macOS (press on the button, drag, release on an item); a click
+      // also picks, which is what the keyboard, screen readers and UI automation send.
+      const choose = () => { if (!menu.isConnected) return; closeMenu(); pick(it.value); };
+      el.onmouseup = choose;
+      el.onclick = choose;
     }
     menu.appendChild(el); index++;
   }
@@ -224,9 +234,15 @@ function openMenu(button) {
   menu.style.top = top + "px"; menu.style.left = Math.max(4, left) + "px";
 }
 function closeMenu() {
+  const wasOpen = !!$("menu");
   for (const el of document.querySelectorAll(".veil, .menu")) el.remove();
   for (const el of document.querySelectorAll(".popup.open")) el.classList.remove("open");
+  // Fresh data that arrived while the menu was open is shown now.
+  if (wasOpen && stale) { stale = false; render(); }
 }
+// The program sent new data while a menu was open or a hotkey was being typed: drawing it
+// then would close the menu under the user's pointer, so it waits.
+let stale = false;
 
 // ---------- pages ----------
 function sourceItems() {
@@ -288,11 +304,27 @@ function pageSound() {
   const rates = [128, 192, 256, 320];
   MENUS.audio = { items: rates.map((v) => ({ label: v + " кбит/с", value: v })), current: s.audio_kbit, pick: (v) => set({ audio_kbit: v }) };
   if (!rates.includes(s.audio_kbit)) MENUS.audio.items.push({ label: s.audio_kbit + " кбит/с", value: s.audio_kbit });
+  const from = s.sound_from || { type: "all" };
+  const isWindow = s.source.type === "window";
+  const items = [
+    { label: "Весь звук компьютера", value: { type: "all" } },
+    { label: "Только записываемое окно", value: { type: "source" } },
+  ];
+  if (S.apps.length) {
+    items.push({ line: true }, { head: "Только программа" });
+    for (const a of S.apps) items.push({ label: a.name, value: { type: "app", exe: a.exe, name: a.name } });
+  }
+  if (from.type === "app" && !S.apps.some((a) => a.exe === from.exe)) items.push({ label: from.name + " (не запущена)", value: from });
+  MENUS.from = { items, current: from, pick: (v) => set({ sound_from: v }) };
+  const hint = from.type === "all" ? "Всё, что играет через устройство вывода по умолчанию"
+    : from.type === "source" ? (isWindow ? "Только звук программы, чьё окно записывается" : "Сейчас записывается экран, поэтому пишется весь звук. Выберите окно или программу")
+    : "Только звук этой программы, даже если записывается весь экран. Discord, браузер и уведомления не попадут";
   return `
-    <div class="row"><div class="name">Звук системы<small>Всё, что играет через устройство вывода по умолчанию</small></div><button class="switch ${s.system_sound ? "on" : ""}" data-toggle="system_sound"></button></div>
+    <div class="row"><div class="name">Звук программ<small>${esc(hint)}</small></div><button class="switch ${s.system_sound ? "on" : ""}" data-toggle="system_sound"></button></div>
+    <div class="row"><div class="name">Откуда звук</div>${popup("from", MENUS.from.items, from)}</div>
     <div class="row"><div class="name">Микрофон<small>Устройство записи по умолчанию</small></div><button class="switch ${s.microphone ? "on" : ""}" data-toggle="microphone"></button></div>
     <div class="row"><div class="name">Качество звука</div>${popup("audio", MENUS.audio.items, s.audio_kbit)}</div>
-    <div class="note">Звук системы и микрофон пишутся отдельными дорожками: в монтаже их можно править порознь. Простые плееры играют только первую дорожку — звук системы.</div>`;
+    <div class="note">Звук программ и микрофон пишутся отдельными дорожками: в монтаже их можно править порознь. Простые плееры играют только первую дорожку — звук программ. Если выбранная программа запустится позже, её звук подхватится сам.</div>`;
 }
 
 function keyRow(id, name) {
@@ -349,6 +381,7 @@ function pageSystem() {
 const PAGES = { capture: pageCapture, video: pageVideo, sound: pageSound, keys: pageKeys, files: pageFiles, system: pageSystem };
 
 function render() {
+  stale = false;
   const s = S.settings, st = S.status;
   const keep = duration(s.buffer_seconds);
   $("mark").setAttribute("class", "mark " + (st.recording ? "rec" : st.buffer_on ? "on" : ""));
@@ -414,7 +447,8 @@ function describe() {
     if (s.id !== "buffer") s.setAttribute("aria-label", rowName(s));
   }
   for (const p of document.querySelectorAll(".popup")) {
-    p.setAttribute("aria-haspopup", "menu");
+    // No aria-haspopup: with it Chromium offers "expand" instead of "invoke" to UI automation,
+    // and that never reaches the page, so the menu could not be opened that way.
     p.setAttribute("aria-label", `${rowName(p)}: ${p.textContent.trim()}`);
   }
   for (const b of document.querySelectorAll(".seg button[data-seg]")) {
@@ -436,6 +470,10 @@ document.addEventListener("mousedown", (e) => {
   if (e.target.closest("#drag") && !e.target.closest("button") && e.button === 0) cmd("drag");
 });
 document.addEventListener("click", (e) => {
+  // A pop-up opens on mouse press (above). Enter, Space, screen readers and UI automation
+  // send only a click, with detail 0: open it for those too.
+  const pop = e.target.closest("[data-popup]");
+  if (pop) { if (e.detail === 0) openMenu(pop); return; }
   const t = e.target.closest("button");
   if (!t) { if (listening) stopListening(); return; }
   if (t.dataset.key) { startListening(t.dataset.key); return; }
@@ -496,7 +534,11 @@ document.addEventListener("keyup", (e) => { if (listening && e.code === "PrintSc
 window.addEventListener("blur", () => { closeMenu(); if (listening) stopListening(); });
 
 window.rewind = {
-  update(state) { Object.assign(S, state); if (!listening) render(); },
+  update(state) {
+    Object.assign(S, state);
+    if (listening || $("menu")) stale = true;
+    else render();
+  },
   // Test aid: switch the page from outside.
   show(name) { tab = name; render(); },
 };

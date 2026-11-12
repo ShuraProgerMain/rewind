@@ -11,7 +11,7 @@ use windows::Win32::System::Com::CoTaskMemFree;
 
 use crate::capture::Source;
 use crate::encoder::{Codec, VideoCfg};
-use crate::engine::Config;
+use crate::engine::{Config, SoundFrom};
 use crate::sources;
 
 pub const APP_NAME: &str = "Rewind";
@@ -63,6 +63,8 @@ pub struct Settings {
     pub output_dir: String,
     pub cursor: bool,
     pub system_sound: bool,
+    /// Where that sound comes from: everything, the recorded window's program, or one program.
+    pub sound_from: SoundFrom,
     pub microphone: bool,
     pub audio_kbit: u32,
     pub hotkeys: Hotkeys,
@@ -90,6 +92,7 @@ impl Default for Settings {
             output_dir: String::new(),
             cursor: true,
             system_sound: true,
+            sound_from: SoundFrom::All,
             microphone: true,
             audio_kbit: 192,
             hotkeys: Hotkeys::default(),
@@ -193,6 +196,7 @@ impl Settings {
             crop: self.crop.map(|c| (c[0], c[1], c[2], c[3])),
             cursor: self.cursor,
             audio_system: self.system_sound,
+            audio_from: self.sound_from.clone(),
             audio_mic: self.microphone,
             audio_bitrate: self.audio_kbit.clamp(32, 512) as i64 * 1000,
             force_vendor: None,

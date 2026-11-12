@@ -61,7 +61,7 @@ pub struct StreamInfo {
     /// Container tag override, 0 = let the muxer choose.
     pub tag: u32,
     /// Track name shown by editors and players.
-    pub title: &'static str,
+    pub title: String,
 }
 unsafe impl Send for StreamInfo {}
 unsafe impl Sync for StreamInfo {}
@@ -243,7 +243,7 @@ impl Encoder {
             }
             // hvc1 (not hev1) is what QuickTime, Resolve and phones expect for HEVC.
             let tag = if self.codec == Codec::Hevc { mktag(b'h', b'v', b'c', b'1') } else { 0 };
-            let info = StreamInfo { par, time_base: (*self.ctx).time_base, tag, title: "Video" };
+            let info = StreamInfo { par, time_base: (*self.ctx).time_base, tag, title: "Video".into() };
             chk(avcodec_parameters_from_context(par, self.ctx), "avcodec_parameters_from_context")?;
             Ok(Arc::new(info))
         }

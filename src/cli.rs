@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, PostThreadMessageW, M
 use crate::capture::Source;
 use crate::d3d;
 use crate::encoder::{Codec, VideoCfg};
-use crate::engine::{self, Cmd, Config, Event};
+use crate::engine::{self, Cmd, Config, Event, SoundFrom};
 use crate::hotkey;
 use crate::icons;
 use crate::sources::{find_window, monitors, windows_list};
@@ -44,6 +44,8 @@ rewind cli - recording engine test harness
   --no-cursor            do not record the mouse pointer
   --no-sound             do not record system sound
   --no-mic               do not record the microphone
+  --sound-app EXE        take sound only from this program (e.g. game.exe)
+  --sound-window         with --window: take sound only from that window's program
   --audio-kbit N         bitrate of each sound track (default 192)
   --gpu nvidia|amd       force the encoder vendor
   --script LIST          timed commands for tests, e.g. 5:save,8:rec,14:rec,18:quit
@@ -66,6 +68,7 @@ fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
         crop: None,
         cursor: true,
         audio_system: true,
+        audio_from: SoundFrom::All,
         audio_mic: true,
         audio_bitrate: 192_000,
         force_vendor: None,
@@ -133,6 +136,11 @@ fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
             "--no-cursor" => cfg.cursor = false,
             "--no-sound" => cfg.audio_system = false,
             "--no-mic" => cfg.audio_mic = false,
+            "--sound-app" => {
+                let exe = val()?;
+                cfg.audio_from = SoundFrom::App { name: exe.clone(), exe };
+            }
+            "--sound-window" => cfg.audio_from = SoundFrom::Source,
             "--audio-kbit" => {
                 cfg.audio_bitrate = val()?.parse::<i64>().context("--audio-kbit")?.clamp(32, 512) * 1000
             }

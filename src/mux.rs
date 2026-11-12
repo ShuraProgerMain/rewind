@@ -62,7 +62,7 @@ impl Muxer {
                     (*st).avg_frame_rate = rate;
                     (*st).r_frame_rate = rate;
                 }
-                let title = CString::new(info.title)?;
+                let title = CString::new(info.title.as_str())?;
                 av_dict_set(&mut (*st).metadata, c"title".as_ptr(), title.as_ptr(), 0);
                 av_dict_set(&mut (*st).metadata, c"handler_name".as_ptr(), title.as_ptr(), 0);
                 m.tracks.push(Track { src_tb: info.time_base, dst_tb: info.time_base, base: 0 });

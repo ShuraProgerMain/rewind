@@ -3,7 +3,7 @@
 //!   rewind.exe                 tray program (or hands over to the one already running)
 //!   rewind.exe --background    same, but silent if it is already running (autostart)
 //!   rewind.exe --data DIR      keep settings and the journal in DIR
-//!   rewind.exe --send CMD      tell the running program: save | record | buffer | quit
+//!   rewind.exe --send CMD      tell the running program: save | record | screenshot | buffer | quit
 //!   rewind.exe cli [options]   console test harness for the engine (see `cli --help`)
 #![windows_subsystem = "windows"]
 
@@ -15,6 +15,7 @@ mod convert;
 mod d3d;
 mod encoder;
 mod engine;
+mod gamepad;
 mod ffi;
 mod hotkey;
 mod icons;
@@ -27,6 +28,7 @@ mod mux;
 mod picker;
 mod ring;
 mod settings;
+mod shot;
 mod settings_window;
 mod sources;
 mod toast;

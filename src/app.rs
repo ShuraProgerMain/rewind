@@ -29,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::engine::{self, Cmd, Config, Event};
+use crate::gamepad;
 use crate::hotkey;
 use crate::icons;
 use crate::integration::System;
@@ -50,6 +51,8 @@ const WM_UI: u32 = WM_APP + 4;
 const WM_UPDATE: u32 = WM_APP + 7;
 /// A trim has finished.
 const WM_TRIMMED: u32 = WM_APP + 9;
+/// A screenshot has been saved (or failed).
+const WM_SHOT: u32 = WM_APP + 13;
 // Buttons of the "saved" notification (ids for WM_TOAST_ACTION).
 const ACT_OPEN: usize = 1;
 const ACT_REVEAL: usize = 2;
@@ -64,6 +67,7 @@ const NIN_KEYSELECT: u32 = 0x401;
 const CMD_SAVE: usize = 1;
 const CMD_RECORD: usize = 2;
 const CMD_BUFFER: usize = 3;
+const CMD_SHOT: usize = 4;
 const CMD_OPEN_FOLDER: usize = 10;
 const CMD_SHOW_LAST: usize = 11;
 const CMD_SETTINGS: usize = 12;
@@ -119,6 +123,16 @@ struct App {
     pending_trim: Option<PathBuf>,
     trim_tx: Sender<Result<crate::library::Trimmed, String>>,
     trim_rx: Receiver<Result<crate::library::Trimmed, String>>,
+    shot_tx: Sender<Result<PathBuf, String>>,
+    shot_rx: Receiver<Result<PathBuf, String>>,
+    /// A screenshot is being taken (a second press waits for it).
+    shot_busy: bool,
+    /// The action whose gamepad combination is being learned.
+    pad_learning: Option<String>,
+    /// Gamepads connected, as last seen while learning.
+    pads: Option<usize>,
+    /// Shown under the combination being learned ("needs two buttons").
+    pad_hint: String,
 }
 
 /// What the settings page shows about updates.
@@ -362,7 +376,12 @@ impl App {
     fn register_hotkeys(&self) -> Vec<String> {
         let mut taken = Vec::new();
         let keys = &self.settings.hotkeys;
-        for (id, text) in [(CMD_SAVE, &keys.save_clip), (CMD_RECORD, &keys.record), (CMD_BUFFER, &keys.buffer)] {
+        for (id, text) in [
+            (CMD_SAVE, &keys.save_clip),
+            (CMD_RECORD, &keys.record),
+            (CMD_BUFFER, &keys.buffer),
+            (CMD_SHOT, &keys.screenshot),
+        ] {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.hwnd), id as i32);
                 if text.trim().is_empty() {
@@ -379,6 +398,94 @@ impl App {
             }
         }
         taken
+    }
+
+    /// Hands the gamepad combinations to the pad reader (which runs only when some are set).
+    fn configure_pad(&self) {
+        let p = &self.settings.pad;
+        let combos = [(CMD_SAVE, &p.save_clip), (CMD_RECORD, &p.record), (CMD_BUFFER, &p.buffer), (CMD_SHOT, &p.screenshot)]
+            .into_iter()
+            .filter_map(|(id, text)| gamepad::parse(text).map(|mask| (id, mask)))
+            .collect();
+        gamepad::configure(self.hwnd, combos);
+    }
+
+    /// Starts or stops learning a gamepad combination for one action.
+    fn pad_learn(&mut self, id: Option<String>) {
+        self.pad_hint.clear();
+        gamepad::learn(self.hwnd, id.is_some());
+        if id.is_none() {
+            self.pads = None;
+        }
+        self.pad_learning = id;
+        self.push_state();
+    }
+
+    /// Buttons were held together and let go while learning.
+    fn on_pad_learned(&mut self, mask: u32) {
+        let Some(id) = self.pad_learning.clone() else { return };
+        if mask.count_ones() < gamepad::MIN_BUTTONS {
+            self.pad_hint = "Нужны хотя бы две кнопки одновременно".into();
+            self.push_state();
+            return;
+        }
+        let text = gamepad::format(mask);
+        // One combination, one action: it is taken away from any other.
+        for other in ["save_clip", "record", "buffer", "screenshot"] {
+            if let Some(value) = self.settings.pad.get_mut(other) {
+                if *value == text {
+                    value.clear();
+                }
+            }
+        }
+        if let Some(value) = self.settings.pad.get_mut(&id) {
+            *value = text;
+        }
+        self.pad_learn(None);
+        self.settings_changed(true);
+    }
+
+    /// Takes a screenshot on a worker thread; the result comes back as WM_SHOT.
+    fn start_shot(&mut self) {
+        if self.shot_busy {
+            return;
+        }
+        let cfg = match self.settings.engine_config() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.notify(Tone::Error, "Скриншот не сделан", &format!("{e:#}"));
+                return;
+            }
+        };
+        self.shot_busy = true;
+        let (tx, target) = (self.shot_tx.clone(), self.hwnd.0 as isize);
+        thread::spawn(move || {
+            let result = crate::shot::take(&cfg).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(result);
+            unsafe {
+                let _ = PostMessageW(Some(HWND(target as _)), WM_SHOT, WPARAM(0), LPARAM(0));
+            }
+        });
+    }
+
+    fn on_shot(&mut self, result: Result<PathBuf, String>) {
+        self.shot_busy = false;
+        match result {
+            Ok(path) => {
+                log::line(&format!("screenshot: {}", path.display()));
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                self.last_file = Some(path);
+                if self.settings.notifications {
+                    let actions = [("Открыть", ACT_OPEN), ("В папке", ACT_REVEAL)];
+                    toast::show_with(Tone::Good, "Скриншот сохранён", &format!("PNG · {}", size_text(bytes)), &actions);
+                }
+                self.push_files();
+            }
+            Err(e) => {
+                log::line(&format!("screenshot failed: {e}"));
+                self.notify(Tone::Error, "Скриншот не сделан", &e);
+            }
+        }
     }
 
     fn save_settings(&mut self) {
@@ -415,6 +522,7 @@ impl App {
             self.save_settings();
         }
         let taken = self.register_hotkeys();
+        self.configure_pad();
         if !taken.is_empty() && taken != self.taken {
             self.notify(Tone::Error, "Клавиша занята другой программой", &taken.join(", "));
         }
@@ -458,6 +566,7 @@ impl App {
                 .collect::<Vec<_>>(),
             "status": { "buffer_on": self.buffer_on, "recording": self.recording, "has_last": self.last_file.is_some() },
             "taken": self.taken,
+            "pad": { "learning": self.pad_learning, "pads": self.pads, "hint": self.pad_hint },
             "folder": self.settings.output_dir().display().to_string(),
             "version": updater::VERSION,
             "system": { "available": self.system.is_some() },
@@ -595,6 +704,9 @@ impl App {
             self.ui_ready = false;
             self.taken = self.register_hotkeys(); // in case a hotkey was being entered
         }
+        if self.pad_learning.is_some() {
+            self.pad_learn(None);
+        }
     }
 
     /// Applies a partial settings object sent by the page.
@@ -630,6 +742,7 @@ impl App {
                 }
             }
             "set" => self.merge_settings(&msg["settings"]),
+            "pad_learn" => self.pad_learn(msg["id"].as_str().map(str::to_string)),
             "trim" => {
                 let path = PathBuf::from(msg["path"].as_str().unwrap_or_default());
                 let (start, end) = (msg["start"].as_f64().unwrap_or(0.0), msg["end"].as_f64().unwrap_or(0.0));
@@ -645,6 +758,7 @@ impl App {
                 "save" => self.on_command(CMD_SAVE),
                 "record" => self.on_command(CMD_RECORD),
                 "buffer" => self.on_command(CMD_BUFFER),
+                "screenshot" => self.on_command(CMD_SHOT),
                 "open_folder" => self.on_command(CMD_OPEN_FOLDER),
                 "show_last" => self.on_command(CMD_SHOW_LAST),
                 "files" => self.push_files(),
@@ -655,7 +769,7 @@ impl App {
                 }
                 // While a new hotkey is being typed, the old ones must not fire.
                 "hotkeys_pause" => {
-                    for id in [CMD_SAVE, CMD_RECORD, CMD_BUFFER] {
+                    for id in [CMD_SAVE, CMD_RECORD, CMD_BUFFER, CMD_SHOT] {
                         unsafe {
                             let _ = UnregisterHotKey(Some(self.hwnd), id as i32);
                         }
@@ -798,6 +912,7 @@ impl App {
             add(menu, save_flags, CMD_SAVE, &with_key(&format!("Сохранить последние {keep}"), &s.hotkeys.save_clip));
             let rec = if self.recording { "Остановить запись" } else { "Начать запись" };
             add(menu, MF_STRING, CMD_RECORD, &with_key(rec, &s.hotkeys.record));
+            add(menu, MF_STRING, CMD_SHOT, &with_key("Скриншот", &s.hotkeys.screenshot));
             add(menu, check(self.buffer_on), CMD_BUFFER, &with_key("Буфер повтора", &s.hotkeys.buffer));
             add(menu, MF_SEPARATOR, 0, "");
 
@@ -857,6 +972,7 @@ impl App {
         match id {
             CMD_SAVE => drop(self.tx.send(Cmd::SaveClip)),
             CMD_RECORD => drop(self.tx.send(Cmd::ToggleRecord)),
+            CMD_SHOT => self.start_shot(),
             CMD_BUFFER => {
                 if self.settings.buffer_seconds == 0 {
                     self.settings.buffer_seconds = 600;
@@ -917,9 +1033,25 @@ impl App {
             "save" => self.on_command(CMD_SAVE),
             "record" => self.on_command(CMD_RECORD),
             "buffer" => self.on_command(CMD_BUFFER),
+            "screenshot" => self.on_command(CMD_SHOT),
             "quit" => self.on_command(CMD_QUIT),
             // Lets tests press menu items: "menu 201".
             other => {
+                // Test hooks for the gamepad, which a script cannot press: "pad 4" acts as
+                // if the combination for command 4 went down, "pad_learned 960" as if those
+                // buttons were held together while learning.
+                if let Some(id) = other.strip_prefix("pad ").and_then(|n| n.trim().parse::<usize>().ok()) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.hwnd), gamepad::WM_PAD, WPARAM(id), LPARAM(0));
+                    }
+                    return;
+                }
+                if let Some(mask) = other.strip_prefix("pad_learned ").and_then(|n| n.trim().parse::<usize>().ok()) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.hwnd), gamepad::WM_PAD_LEARNED, WPARAM(mask), LPARAM(0));
+                    }
+                    return;
+                }
                 if let Some(id) = other.strip_prefix("menu ").and_then(|n| n.trim().parse::<usize>().ok()) {
                     self.reload_if_edited();
                     self.menu_windows = sources::windows_list().into_iter().map(|(_, t)| t).take(40).collect();
@@ -1104,6 +1236,29 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 open_settings(); // the trim view lives in the settings window
                 with_app(|app| app.deliver_trim());
             }
+            LRESULT(0)
+        }
+        gamepad::WM_PAD => {
+            with_app(|app| app.on_command(wparam.0));
+            LRESULT(0)
+        }
+        gamepad::WM_PAD_LEARNED => {
+            with_app(|app| app.on_pad_learned(wparam.0 as u32));
+            LRESULT(0)
+        }
+        gamepad::WM_PAD_COUNT => {
+            with_app(|app| {
+                app.pads = Some(wparam.0);
+                app.push_state();
+            });
+            LRESULT(0)
+        }
+        WM_SHOT => {
+            with_app(|app| {
+                while let Ok(result) = app.shot_rx.try_recv() {
+                    app.on_shot(result);
+                }
+            });
             LRESULT(0)
         }
         WM_TRIMMED => {
@@ -1310,6 +1465,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
     let (ui_tx, ui_rx) = channel::<String>();
     let (update_tx, update_rx) = channel();
     let (trim_tx, trim_rx) = channel();
+    let (shot_tx, shot_rx) = channel();
     let waiting = updater::staged(&exe);
     let mut app = App {
         hwnd,
@@ -1347,6 +1503,12 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         pending_trim: None,
         trim_tx,
         trim_rx,
+        shot_tx,
+        shot_rx,
+        shot_busy: false,
+        pad_learning: None,
+        pads: None,
+        pad_hint: String::new(),
     };
     if first_run {
         app.save_settings(); // so the file exists for editing
@@ -1380,6 +1542,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
     }
     let taken = app.register_hotkeys();
     app.taken = taken.clone();
+    app.configure_pad();
     if let Some(e) = source_error {
         log::line(&format!("source unavailable, recording the primary display instead: {e}"));
         app.notify(Tone::Error, "Источник недоступен", "Записывается основной экран");

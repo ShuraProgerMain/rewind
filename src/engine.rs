@@ -257,7 +257,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
             // Start/stop requests that arrived while the pipeline was down or since the last tick.
             if st.want_rec != recording {
                 if st.want_rec {
-                    let path = out_path(cfg, "Запись")?;
+                    let path = out_path(cfg, "Запись", "mp4")?;
                     let _ = wtx.send(WMsg::StartRec(path));
                     force_key = true; // the file must begin with a keyframe: make one right now
                 } else {
@@ -341,7 +341,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                     if pk.is_empty() {
                         emit(Event::NothingToSave);
                     } else {
-                        let _ = wtx.send(WMsg::Save(pk, out_path(cfg, "Клип")?));
+                        let _ = wtx.send(WMsg::Save(pk, out_path(cfg, "Клип", "mp4")?));
                     }
                 }
             }
@@ -467,17 +467,17 @@ fn subject(cfg: &Config) -> String {
 
 /// `<folder>/<program>/2026-11-12 14-03-05 Клип.mp4`: the date and time come first, so
 /// sorting by name is the order in which clips and recordings were made.
-fn out_path(cfg: &Config, kind: &str) -> Result<PathBuf> {
+pub fn out_path(cfg: &Config, kind: &str, ext: &str) -> Result<PathBuf> {
     let name = crate::library::safe_name(&subject(cfg));
     let dir = if cfg.folders_by_app { cfg.out_dir.join(&name) } else { cfg.out_dir.clone() };
     std::fs::create_dir_all(&dir)?;
     let t = unsafe { GetLocalTime() };
     let when = format!("{:04}-{:02}-{:02} {:02}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
     let stem = if cfg.folders_by_app { format!("{when} {kind}") } else { format!("{when} {kind} — {name}") };
-    let mut path = dir.join(format!("{stem}.mp4"));
+    let mut path = dir.join(format!("{stem}.{ext}"));
     let mut n = 2;
     while path.exists() {
-        path = dir.join(format!("{stem} ({n}).mp4"));
+        path = dir.join(format!("{stem} ({n}).{ext}"));
         n += 1;
     }
     Ok(path)

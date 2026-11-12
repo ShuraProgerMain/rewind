@@ -34,9 +34,9 @@ fn places() -> Option<(PathBuf, PathBuf)> {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Entry {
     pub path: String,
-    /// File name without ".mp4".
+    /// File name without the extension.
     pub name: String,
-    /// "clip", "rec" or "" (any other video in the folder).
+    /// "clip", "rec", "shot" (a PNG screenshot) or "" (any other video in the folder).
     pub kind: &'static str,
     /// Program it was recorded from: its folder, or the part after " — " in the name.
     pub app: String,
@@ -110,7 +110,7 @@ pub fn list(limit: usize) -> Vec<Entry> {
                 if depth == 0 {
                     dirs.push((path, 1));
                 }
-            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")) {
+            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("png")) {
                 files.push((path, meta));
             }
         }
@@ -125,9 +125,12 @@ pub fn list(limit: usize) -> Vec<Entry> {
         .map(|(path, meta)| {
             let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let key = (path.clone(), stamp(&meta), meta.len());
-            let secs = *cache.entry(key).or_insert_with(|| duration(&path));
+            let picture = is_picture(&path);
+            let secs = if picture { 0.0 } else { *cache.entry(key).or_insert_with(|| duration(&path)) };
             let lower = name.to_lowercase();
-            let kind = if lower.contains("клип") || lower.starts_with("clip") {
+            let kind = if picture {
+                "shot"
+            } else if lower.contains("клип") || lower.starts_with("clip") {
                 "clip"
             } else if lower.contains("запись") || lower.starts_with("rec") {
                 "rec"
@@ -168,8 +171,9 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf> {
     if !inside(path) {
         bail!("not a file in the recordings folder");
     }
-    let stem = safe_name(new_name.trim().trim_end_matches(".mp4"));
-    let target = path.with_file_name(format!("{stem}.mp4"));
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "mp4".into());
+    let stem = safe_name(new_name.trim().trim_end_matches(&format!(".{ext}")));
+    let target = path.with_file_name(format!("{stem}.{ext}"));
     if target == path {
         return Ok(target);
     }
@@ -178,6 +182,11 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf> {
     }
     std::fs::rename(path, &target)?;
     Ok(target)
+}
+
+/// A screenshot (PNG) rather than a video.
+pub fn is_picture(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
 }
 
 /// A preview picture (BMP) from the middle of a video, cached on disk by file and date.
@@ -190,6 +199,9 @@ pub fn thumbnail(path: &Path) -> Result<Vec<u8>> {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a over path, date and size
     for b in path.to_string_lossy().bytes().chain(stamp(&meta).to_le_bytes()).chain(meta.len().to_le_bytes()) {
         hash = (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    if is_picture(path) {
+        return Ok(std::fs::read(path)?); // a screenshot is its own preview
     }
     let cached = cache_dir.join(format!("{hash:016x}.bmp"));
     if let Ok(bytes) = std::fs::read(&cached) {

@@ -152,6 +152,14 @@ body.trimming #trim { display: block; }
 .key.empty { color: var(--placeholder); }
 .key.listening { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); color: var(--secondary); }
 .key.taken { border-color: var(--red); }
+.keys .key { width: 132px; min-width: 0; flex: none; }
+.keys .key.pad { width: 176px; }
+.key > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key.pad svg { width: 15px; height: 15px; margin-right: 6px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.3; opacity: .7; }
+.cols { display: flex; gap: 12px; padding: 6px 0 2px; font-size: 11px; color: var(--secondary); }
+.cols span:first-child { flex: 1; }
+.cols span:nth-child(2) { width: 132px; text-align: center; }
+.cols span:nth-child(3) { width: 176px; text-align: center; }
 .bad { color: var(--red); font-size: 11px; }
 
 </style>
@@ -187,7 +195,9 @@ const CHEVRONS = '<svg viewBox="0 0 10 14"><path d="M2.4 5.2L5 2.6l2.6 2.6M2.4 8
 let S = {
   settings: { source: { type: "primary" }, crop: null, fps: 60, codec: "hevc", quality: 20, max_mbit: 100,
     buffer_seconds: 600, buffer_memory_mb: 4096, output_dir: "", cursor: true, system_sound: true, microphone: true,
-    audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8" }, notifications: true },
+    audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8", screenshot: "Ctrl+Alt+F11" },
+    pad: { save_clip: "LB+RB+L3+R3", record: "", buffer: "", screenshot: "" }, notifications: true },
+  pad: { learning: null, pads: null, hint: "" },
   apps: [{ exe: "eldenring.exe", name: "ELDEN RING" }, { exe: "telegram.exe", name: "Telegram Desktop" }],
   monitors: [{ device:"\\\\.\\DISPLAY1", label: "Экран 1 — 2560×1440, основной", primary: true }, { device: "\\\\.\\DISPLAY2", label: "Экран 2 — 3440×1440", primary: false }],
   windows: ["Telegram", "Obsidian"],
@@ -377,13 +387,31 @@ function keyRow(id, name) {
   const taken = value && S.taken.includes(value);
   const text = isListening ? (partial || "Нажмите сочетание…") : (value || "Не задано");
   return `<div class="row"><div class="name">${name}${taken ? '<small class="bad">Занята другой программой</small>' : ""}</div>
-    <button class="key ${isListening ? "listening" : ""} ${value ? "" : "empty"} ${taken ? "taken" : ""}" data-key="${id}">${esc(text)}</button></div>`;
+    <button class="key ${isListening ? "listening" : ""} ${value ? "" : "empty"} ${taken ? "taken" : ""}" data-key="${id}" aria-label="Клавиши: ${esc(name)}">${esc(text)}</button>
+    ${padButton(id, name)}</div>`;
+}
+const PAD_ICON = '<svg viewBox="0 0 16 16"><path d="M4.6 4.5h6.8a3 3 0 0 1 2.9 2.3l.8 3.4a1.6 1.6 0 0 1-2.7 1.5L10.9 10H5.1l-1.5 1.7A1.6 1.6 0 0 1 .9 10.2l.8-3.4a3 3 0 0 1 2.9-2.3zM4.5 6.4v2M3.5 7.4h2"/><circle cx="11" cy="6.9" r=".5"/><circle cx="12.2" cy="8.1" r=".5"/></svg>';
+function padLearning() { return S.pad && S.pad.learning; }
+function padButton(id, name) {
+  const value = (S.settings.pad || {})[id] || "";
+  const learning = padLearning() === id;
+  const text = learning ? "Зажмите кнопки…" : (value ? value.split("+").join(" + ") : "Не задано");
+  return `<button class="key pad ${learning ? "listening" : ""} ${value ? "" : "empty"}" data-pad="${id}" aria-label="Геймпад: ${esc(name)}" title="${esc(text)}">${PAD_ICON}<span>${esc(text)}</span></button>`;
 }
 function pageKeys() {
-  return keyRow("save_clip", "Сохранить последние " + duration(S.settings.buffer_seconds))
+  let note = "Нажмите на поле клавиатуры и затем на сочетание клавиш. Для геймпада нажмите на его поле, зажмите 2–4 кнопки сразу и отпустите: такое сочетание не нажать случайно в игре. Backspace убирает сочетание, Esc — отмена.";
+  if (padLearning()) {
+    note = S.pad.pads === 0 ? '<span class="bad">Геймпад не найден. Подключите его в режиме Xbox (XInput)</span>'
+      : S.pad.hint ? `<span class="bad">${esc(S.pad.hint)}</span>`
+      : "Зажмите на геймпаде 2–4 кнопки сразу и отпустите. Подойдёт и кнопка, на которую в программе геймпада записан макрос с этими кнопками. Esc — отмена, Backspace убирает сочетание.";
+    note = `<span role="status">${note}</span>`;
+  }
+  return `<div class="keys"><div class="cols" aria-hidden="true"><span></span><span>Клавиатура</span><span>Геймпад</span></div>`
+    + keyRow("save_clip", "Сохранить последние " + duration(S.settings.buffer_seconds))
     + keyRow("record", "Начать и остановить запись")
+    + keyRow("screenshot", "Скриншот")
     + keyRow("buffer", "Включить и выключить буфер")
-    + `<div class="note">Нажмите на поле, затем на сочетание клавиш. Backspace убирает сочетание, Esc — отмена. Клавиши работают в любой программе и в играх.</div>`;
+    + `<div class="note">${note}</div></div>`;
 }
 
 const ICONS = {
@@ -420,7 +448,7 @@ function bytes(n) {
 }
 
 function fileRow(f) {
-  const kind = f.kind === "clip" ? "Клип" : f.kind === "rec" ? "Запись" : "Видео";
+  const kind = f.kind === "clip" ? "Клип" : f.kind === "rec" ? "Запись" : f.kind === "shot" ? "Скриншот" : "Видео";
   // A name Rewind gave ("2026-11-12 14-03-05 Клип") reads better as "Клип · ELDEN RING";
   // a name the user typed is shown as it is, with the program next to the time.
   const own = !/^\d{4}-\d\d-\d\d \d\d-\d\d-\d\d/.test(f.name);
@@ -437,7 +465,7 @@ function fileRow(f) {
       <div class="acts">
         <button class="icon-btn" data-op="open" aria-label="Открыть: ${esc(f.name)}" title="Открыть">${ICONS.play}</button>
         <button class="icon-btn" data-op="reveal" aria-label="Показать в папке: ${esc(f.name)}" title="Показать в папке">${ICONS.folder}</button>
-        <button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>
+        ${f.kind === "shot" ? "" : `<button class="icon-btn" data-op="trim" aria-label="Обрезать: ${esc(f.name)}" title="Обрезать">${ICONS.scissors}</button>`}
         <button class="icon-btn" data-op="rename" aria-label="Переименовать: ${esc(f.name)}" title="Переименовать">${ICONS.rename}</button>
         <button class="icon-btn" data-op="delete" aria-label="В корзину: ${esc(f.name)}" title="В корзину">${ICONS.trash}</button>
       </div>
@@ -448,7 +476,7 @@ function pageFiles() {
   const s = S.settings;
   let list;
   if (!S.files) list = '<div class="empty">Загружаю…</div>';
-  else if (!S.files.length) list = '<div class="empty">Здесь появятся клипы и записи.<br>Сохраните клип или начните запись.</div>';
+  else if (!S.files.length) list = '<div class="empty">Здесь появятся клипы, записи и скриншоты.<br>Сохраните клип или начните запись.</div>';
   else {
     let day = "", rows = "";
     for (const f of S.files) {
@@ -588,7 +616,13 @@ document.addEventListener("click", (e) => {
   const pop = e.target.closest("[data-popup]");
   if (pop) { if (e.detail === 0) openMenu(pop); return; }
   const t = e.target.closest("button");
-  if (!t) { if (listening) stopListening(); return; }
+  if (!t) { if (listening) stopListening(); if (padLearning()) send({ t: "pad_learn", id: null }); return; }
+  if (t.dataset.pad) {
+    if (listening) stopListening();
+    send({ t: "pad_learn", id: padLearning() === t.dataset.pad ? null : t.dataset.pad });
+    return;
+  }
+  if (padLearning()) send({ t: "pad_learn", id: null });
   if (t.dataset.key) { startListening(t.dataset.key); return; }
   if (listening) stopListening();
   if (t.dataset.op) { fileAction(t.dataset.op, t.closest("[data-file]").dataset.file); return; }
@@ -632,6 +666,15 @@ function finishKey(e) {
   cmd("hotkeys_resume"); render();
 }
 document.addEventListener("keydown", (e) => {
+  if (padLearning() && (e.key === "Escape" || e.key === "Backspace")) {
+    e.preventDefault();
+    if (e.key === "Backspace") {
+      S.settings.pad = Object.assign({}, S.settings.pad, { [padLearning()]: "" });
+      send({ t: "set", settings: { pad: S.settings.pad } });
+    }
+    send({ t: "pad_learn", id: null });
+    return;
+  }
   if (!listening) { if (e.key === "Escape" && !T.path) { if ($("menu")) closeMenu(); else cmd("close"); } return; }
   e.preventDefault();
   if (e.key === "Escape") { stopListening(); return; }

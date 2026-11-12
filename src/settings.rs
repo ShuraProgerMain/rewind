@@ -34,11 +34,39 @@ pub struct Hotkeys {
     pub save_clip: String,
     pub record: String,
     pub buffer: String,
+    pub screenshot: String,
 }
 
 impl Default for Hotkeys {
     fn default() -> Self {
-        Self { save_clip: "Ctrl+Alt+F10".into(), record: "Ctrl+Alt+F9".into(), buffer: "Ctrl+Alt+F8".into() }
+        Self {
+            save_clip: "Ctrl+Alt+F10".into(),
+            record: "Ctrl+Alt+F9".into(),
+            buffer: "Ctrl+Alt+F8".into(),
+            screenshot: "Ctrl+Alt+F11".into(),
+        }
+    }
+}
+
+/// Gamepad button combinations for the same actions ("LB+RB+L3+R3"); empty = none.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct PadKeys {
+    pub save_clip: String,
+    pub record: String,
+    pub buffer: String,
+    pub screenshot: String,
+}
+
+impl PadKeys {
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut String> {
+        match id {
+            "save_clip" => Some(&mut self.save_clip),
+            "record" => Some(&mut self.record),
+            "buffer" => Some(&mut self.buffer),
+            "screenshot" => Some(&mut self.screenshot),
+            _ => None,
+        }
     }
 }
 
@@ -70,6 +98,7 @@ pub struct Settings {
     pub microphone: bool,
     pub audio_kbit: u32,
     pub hotkeys: Hotkeys,
+    pub pad: PadKeys,
     pub notifications: bool,
     /// On-screen pill: "recording" (while recording), "always" (also while the buffer runs) or "off".
     pub indicator: String,
@@ -101,6 +130,7 @@ impl Default for Settings {
             microphone: true,
             audio_kbit: 192,
             hotkeys: Hotkeys::default(),
+            pad: PadKeys::default(),
             notifications: true,
             indicator: "recording".into(),
             autostart: false,

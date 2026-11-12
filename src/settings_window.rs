@@ -272,7 +272,7 @@ impl SettingsWindow {
                         let picture = file.and_then(|f| crate::library::thumbnail(Path::new(&f)).ok());
                         let response = match picture {
                             Some(bytes) => Response::builder()
-                                .header("Content-Type", "image/bmp")
+                                .header("Content-Type", if bytes.starts_with(b"\x89PNG") { "image/png" } else { "image/bmp" })
                                 .header("Cache-Control", "max-age=86400")
                                 .body(Cow::Owned(bytes)),
                             None => Response::builder().status(404).body(Cow::Borrowed(&[][..])),

@@ -204,6 +204,9 @@ function openMenu(button) {
       const on = same(it.value, current);
       if (on) currentIndex = index;
       el.innerHTML = (on ? CHECK : "") + "<span>" + esc(it.label) + "</span>";
+      el.setAttribute("role", "menuitemradio");
+      el.setAttribute("aria-checked", on ? "true" : "false");
+      el.setAttribute("aria-label", it.label);
       el.onmouseup = () => { closeMenu(); pick(it.value); };
     }
     menu.appendChild(el); index++;
@@ -357,9 +360,73 @@ function render() {
   $("record").textContent = st.recording ? "Остановить запись" : "Начать запись";
   $("record").className = "push " + (st.recording ? "stop" : "primary");
   $("buffer").className = "switch " + (st.buffer_on ? "on" : "");
-  $("tabs").innerHTML = TABS.map(([id, name]) => `<button class="${id === tab ? "on" : ""}" data-tab="${id}">${name}</button>`).join("");
+  morph($("tabs"), TABS.map(([id, name]) => `<button class="${id === tab ? "on" : ""}" data-tab="${id}">${name}</button>`).join(""));
   closeMenu();
-  $("page").innerHTML = PAGES[tab]();
+  morph($("page"), PAGES[tab]());
+  describe();
+}
+
+// Updates a container to new markup in place: elements that are still there keep their
+// identity, so keyboard focus stays on the switch you just pressed and screen readers and
+// UI automation do not lose track of it. Only what changed is touched.
+function morph(container, html) {
+  const fresh = document.createElement("template");
+  fresh.innerHTML = html;
+  patch(container, fresh.content);
+}
+function patch(old, now) {
+  const a = Array.from(old.childNodes), b = Array.from(now.childNodes);
+  for (let i = 0; i < b.length; i++) {
+    const x = a[i], y = b[i];
+    if (!x) { old.appendChild(y.cloneNode(true)); continue; }
+    if (x.nodeType !== y.nodeType || x.nodeName !== y.nodeName) { old.replaceChild(y.cloneNode(true), x); continue; }
+    if (x.nodeType === Node.TEXT_NODE) { if (x.nodeValue !== y.nodeValue) x.nodeValue = y.nodeValue; continue; }
+    if (x.nodeType !== Node.ELEMENT_NODE) continue;
+    for (const attr of Array.from(x.attributes)) {
+      // aria-* are filled in afterwards by describe(); keep them.
+      if (!y.hasAttribute(attr.name) && !attr.name.startsWith("aria-") && attr.name !== "role") x.removeAttribute(attr.name);
+    }
+    for (const attr of Array.from(y.attributes)) if (x.getAttribute(attr.name) !== attr.value) x.setAttribute(attr.name, attr.value);
+    if ("disabled" in x) x.disabled = y.hasAttribute("disabled");
+    patch(x, y);
+  }
+  for (let i = a.length - 1; i >= b.length; i--) a[i].remove();
+}
+
+// Names and states for screen readers and UI automation: without them every switch is the
+// same nameless button and a pop-up says "10 мин" without saying what it sets.
+function describe() {
+  const rowName = (el) => {
+    const name = el.closest(".row")?.querySelector(".name");
+    return name ? (name.firstChild?.textContent || name.textContent).trim() : "";
+  };
+  // Tabs stay plain buttons marked "current": with role="tab" Chromium no longer turns an
+  // accessibility "invoke" into a click, and aria-pressed would present them as switches.
+  $("tabs").setAttribute("aria-label", "Разделы настроек");
+  for (const b of $("tabs").querySelectorAll("button")) {
+    if (b.classList.contains("on")) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  }
+  $("buffer").setAttribute("aria-label", "Буфер повтора");
+  for (const s of document.querySelectorAll(".switch")) {
+    s.setAttribute("role", "switch");
+    s.setAttribute("aria-checked", s.classList.contains("on") ? "true" : "false");
+    if (s.id !== "buffer") s.setAttribute("aria-label", rowName(s));
+  }
+  for (const p of document.querySelectorAll(".popup")) {
+    p.setAttribute("aria-haspopup", "menu");
+    p.setAttribute("aria-label", `${rowName(p)}: ${p.textContent.trim()}`);
+  }
+  for (const b of document.querySelectorAll(".seg button[data-seg]")) {
+    b.setAttribute("aria-pressed", b.classList.contains("on") ? "true" : "false");
+    b.setAttribute("aria-label", `${rowName(b)}: ${b.textContent.trim()}`);
+  }
+  for (const k of document.querySelectorAll(".key")) k.setAttribute("aria-label", `${rowName(k)}: ${k.textContent.trim()}`);
+  for (const b of document.querySelectorAll(".push.small")) {
+    const name = rowName(b);
+    if (name && !b.hasAttribute("aria-label")) b.setAttribute("aria-label", `${name}: ${b.textContent.trim()}`);
+  }
+  $("close").setAttribute("aria-label", "Закрыть");
 }
 
 // ---------- events ----------

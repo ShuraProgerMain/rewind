@@ -19,6 +19,10 @@ pub const WM_PAD: u32 = WM_APP + 10;
 pub const WM_PAD_LEARNED: u32 = WM_APP + 11;
 /// The number of connected pads changed (only reported while learning); wparam = count.
 pub const WM_PAD_COUNT: u32 = WM_APP + 12;
+/// While a menu is shown (see `navigate`): A was pressed on its own; wparam = NAV_A.
+pub const WM_PAD_NAV: u32 = WM_APP + 16;
+
+pub const NAV_A: u32 = 0x1000;
 
 /// Triggers count as buttons when pulled past half way.
 const LT: u32 = 0x1_0000;
@@ -67,6 +71,8 @@ struct Shared {
     owner: isize,
     combos: Vec<(usize, u32)>,
     learning: bool,
+    /// A menu is on screen: report the d-pad, A and B.
+    nav: bool,
     running: bool,
 }
 
@@ -84,6 +90,22 @@ pub fn configure(owner: HWND, combos: Vec<(usize, u32)>) {
     wake(&mut s, cv);
 }
 
+/// Starts or stops reporting A (WM_PAD_NAV), for a menu on screen: A takes its choice. Only
+/// A pressed on its own counts, so a combination that contains it does not.
+pub fn navigate(owner: HWND, on: bool) {
+    let (lock, cv) = shared();
+    let mut s = lock.lock().unwrap();
+    s.owner = owner.0 as isize;
+    s.nav = on;
+    wake(&mut s, cv);
+}
+
+/// A navigation button that went down alone (nothing else held), if any.
+fn nav_press(before: u32, now: u32) -> Option<u32> {
+    let pressed = now & !before;
+    [NAV_A].into_iter().find(|&b| pressed == b && now == b)
+}
+
 /// Starts or stops learning: while on, combinations do not fire and every chord that is
 /// pressed and let go is reported with WM_PAD_LEARNED.
 pub fn learn(owner: HWND, on: bool) {
@@ -95,7 +117,7 @@ pub fn learn(owner: HWND, on: bool) {
 }
 
 fn wake(s: &mut Shared, cv: &Condvar) {
-    if !s.running && (s.learning || !s.combos.is_empty()) {
+    if !s.running && (s.learning || s.nav || !s.combos.is_empty()) {
         s.running = true;
         thread::spawn(poll_thread);
     }
@@ -142,18 +164,18 @@ fn poll_thread() {
     let mut count_sent: Option<usize> = None;
     let (lock, cv) = shared();
     loop {
-        let (owner, combos, learning) = {
+        let (owner, combos, learning, nav) = {
             let mut s = lock.lock().unwrap();
-            if !s.learning && s.combos.is_empty() {
+            if !s.learning && !s.nav && s.combos.is_empty() {
                 // Nothing to do: wait a moment for new work, else end the thread.
                 let (guard, _) = cv.wait_timeout(s, Duration::from_secs(5)).unwrap();
                 s = guard;
-                if !s.learning && s.combos.is_empty() {
+                if !s.learning && !s.nav && s.combos.is_empty() {
                     s.running = false;
                     return;
                 }
             }
-            (s.owner, s.combos.clone(), s.learning)
+            (s.owner, s.combos.clone(), s.learning, s.nav)
         };
         if learning != was_learning {
             chord = [0; 4];
@@ -187,6 +209,11 @@ fn poll_thread() {
             for (id, combo) in &combos {
                 if fires(before, now_held, *combo) {
                     post(owner, WM_PAD, *id);
+                }
+            }
+            if nav {
+                if let Some(button) = nav_press(before, now_held) {
+                    post(owner, WM_PAD_NAV, button as usize);
                 }
             }
         }
@@ -225,5 +252,17 @@ mod tests {
         assert_eq!(fired, [false, false, true, false, false, false]);
         // Extra buttons held do not stop it.
         assert!(fires(0x1000, 0x1000 | combo, combo));
+    }
+
+    #[test]
+    fn navigation_only_alone() {
+        assert_eq!(nav_press(0, NAV_A), Some(NAV_A));
+        // Part of a combination (L3+R3+A): not a choice.
+        let combo = parse("L3+R3+A").unwrap();
+        assert_eq!(nav_press(0x00C0, combo), None);
+        assert_eq!(nav_press(0, combo), None);
+        // Held, not newly pressed; other buttons are not reported.
+        assert_eq!(nav_press(NAV_A, NAV_A), None);
+        assert_eq!(nav_press(0, 0x0002), None);
     }
 }

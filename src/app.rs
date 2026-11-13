@@ -575,6 +575,9 @@ impl App {
         if let Some((_, pad)) = self.mark_note.filter(|(note, _)| *note == id) {
             self.mark_note = None;
             crate::notebox::open(self.hwnd, id, &heading, &self.settings.mark_presets, pad);
+            if pad {
+                gamepad::navigate(self.hwnd, true); // A takes the highlighted title at once
+            }
         } else if self.settings.notifications {
             let detail = if rec_secs.is_some() { "Войдёт в запись" } else { "Войдёт в клип, если сохранить буфер" };
             toast::show(Tone::Info, &heading, detail);
@@ -1209,6 +1212,8 @@ impl App {
             CMD_RECORD => drop(self.tx.send(Cmd::ToggleRecord)),
             CMD_SHOT => self.start_shot(),
             CMD_MARK => self.place_mark(false),
+            // With the title card already up, the keyboard shortcut asks to type in it.
+            CMD_MARK_NOTE if crate::notebox::is_open() => crate::notebox::focus_field(),
             CMD_MARK_NOTE => self.place_mark(true),
             CMD_BUFFER => {
                 if self.settings.buffer_seconds == 0 {
@@ -1282,6 +1287,13 @@ impl App {
                 if let Some(id) = other.strip_prefix("pad ").and_then(|n| n.trim().parse::<usize>().ok()) {
                     unsafe {
                         let _ = PostMessageW(Some(self.hwnd), gamepad::WM_PAD, WPARAM(id), LPARAM(0));
+                    }
+                    return;
+                }
+                // Test hook: "pad_nav 4096" acts as if A was pressed alone.
+                if let Some(button) = other.strip_prefix("pad_nav ").and_then(|n| n.trim().parse::<usize>().ok()) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.hwnd), gamepad::WM_PAD_NAV, WPARAM(button), LPARAM(0));
                     }
                     return;
                 }
@@ -1483,8 +1495,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         gamepad::WM_PAD => {
-            if wparam.0 == CMD_MARK_NOTE && crate::notebox::is_pad_open() {
-                crate::notebox::next(); // the same combination steps through the preset titles
+            if wparam.0 == CMD_MARK_NOTE && crate::notebox::is_open() {
+                crate::notebox::step(1); // the same combination steps through the preset titles
             } else {
                 with_app(|app| {
                     app.pad_trigger = true;
@@ -1505,7 +1517,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             LRESULT(0)
         }
+        gamepad::WM_PAD_NAV => {
+            if wparam.0 as u32 == gamepad::NAV_A {
+                crate::notebox::choose();
+            }
+            LRESULT(0)
+        }
         crate::notebox::WM_NOTE_DONE => {
+            if !crate::notebox::is_open() {
+                gamepad::navigate(hwnd, false);
+            }
             for (id, title) in crate::notebox::take() {
                 log::line(&format!("title box for {id} closed: {}", title.as_deref().map_or("no title".to_string(), |t| format!("\"{t}\""))));
                 if let Some(title) = title {

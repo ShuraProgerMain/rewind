@@ -1,16 +1,18 @@
-//! The title box: a small card over the game for naming a marker that was just placed.
-//! The marker itself is already stored when the box appears (its moment is the key press),
-//! so the box only adds a title. Invisible to screen capture, like the notifications.
+//! The title card: a small card over the game for naming a marker that was just placed.
+//! The marker itself is already stored when the card appears (its moment is the key press),
+//! so the card only adds a title. Invisible to screen capture, like the notifications.
 //! Lives on the tray (UI) thread.
 //!
-//! Two ways to use it:
-//! * keyboard: a text field takes the focus; ↑/↓ pick one of the preset titles, or type your
-//!   own; Enter keeps it, Esc leaves the marker untitled, clicking elsewhere keeps what was
-//!   typed. Focus goes back to the game afterwards.
-//! * gamepad: the card never takes the focus (the game keeps running and keeps its input).
-//!   It lists the presets; pressing the same button combination again moves to the next one,
-//!   and after a few seconds without presses the highlighted one is taken. The combination
-//!   is one the game ignores, so nothing else has to be pressed.
+//! One card, whatever opened it: a text field, and under it the preset titles and "no
+//! title". Picking a row (the same gamepad combination again, or ↑/↓) puts its text into the
+//! field; what is in the field when the card closes becomes the title.
+//! * Opened from the gamepad, the card does not take the focus (the game keeps running and
+//!   keeps its input): the first preset is already in the field, A takes it at once, and
+//!   after a few seconds without presses it is taken anyway.
+//! * Opened from the keyboard, or clicked, or asked for with the keyboard shortcut while it
+//!   is up, the field takes the focus and the countdown stops: type, Enter keeps it, Esc
+//!   leaves the marker untitled, clicking elsewhere keeps what was typed. Focus then goes
+//!   back to the game.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -34,13 +36,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, KillTimer, PostMessageW,
     RegisterClassExW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW,
     SetWindowLongW, SetWindowPos, SetWindowTextW, ShowWindow, ES_AUTOHSCROLL, GWLP_WNDPROC, GWL_EXSTYLE, HMENU,
-    HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WA_INACTIVE,
-    WDA_EXCLUDEFROMCAPTURE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_MOUSEACTIVATE, WM_PAINT,
-    WM_SETFONT, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    HWND_TOPMOST, MA_ACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE, WDA_EXCLUDEFROMCAPTURE,
+    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_SETFONT, WM_TIMER,
+    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
-/// Posted to the owner when the box closes; `take()` then gives the marker id and title
+/// Posted to the owner when the card closes; `take()` then gives the marker id and title
 /// (None = closed without a title).
 pub const WM_NOTE_DONE: u32 = WM_APP + 14;
 
@@ -51,7 +52,7 @@ const FIELD_HEIGHT: i32 = 34;
 const ROW: i32 = 28;
 const HINT: i32 = 18;
 const GAP: i32 = 8;
-/// Gamepad: the highlighted title is taken after this long without a press.
+/// Opened from the gamepad: the field's title is taken after this long without a press.
 const PICK_MS: u32 = 3000;
 const TIMER_PICK: usize = 1;
 const TIMER_BAR: usize = 2;
@@ -76,16 +77,18 @@ struct State {
     fonts: Option<(HFONT, HFONT, HFONT)>,
     field_brush: HBRUSH,
     old_edit_proc: WNDPROC,
-    /// Boxes closed and not yet collected by the owner (one may close as the next opens).
+    /// Cards closed and not yet collected by the owner (one may close as the next opens).
     results: Vec<(u64, Option<String>)>,
-    /// When the box opened (ms tick): focus shuffles right after opening are not "clicked away".
-    opened_at: u64,
     presets: Vec<String>,
-    /// Highlighted preset; in gamepad mode `presets.len()` means "no title".
+    /// Highlighted row: a preset, or `presets.len()` for "no title".
     selected: Option<usize>,
-    /// Opened from the gamepad: no focus, no field, the presets are stepped through.
-    pad: bool,
-    /// When the gamepad selection last moved (ms tick), for the countdown bar.
+    /// The field has the focus (we took it from the game and give it back at the end).
+    focused: bool,
+    /// When the field took the focus (ms tick): focus shuffles right after are expected.
+    focused_at: u64,
+    /// Opened from the gamepad and not touched by the keyboard yet: the countdown runs.
+    countdown: bool,
+    /// When the countdown last started (ms tick), for its bar.
     stepped_at: u64,
 }
 
@@ -101,10 +104,24 @@ unsafe fn font(px: i32, weight: i32) -> HFONT {
     CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, Default::default(), Default::default(), Default::default(), CLEARTYPE_QUALITY, 0, w!("Segoe UI"))
 }
 
+/// Rows under the field: the presets and "no title" (none at all without presets).
+fn rows(s: &State) -> usize {
+    if s.presets.is_empty() {
+        0
+    } else {
+        s.presets.len() + 1
+    }
+}
+
+/// The title a row stands for ("no title" is empty).
+fn row_text(s: &State, i: usize) -> String {
+    s.presets.get(i).cloned().unwrap_or_default()
+}
+
 /// Where things go, in design pixels: (field top, list top, hint top, height).
-fn layout(pad_mode: bool, rows: usize) -> (i32, i32, i32, i32) {
+fn layout(rows: usize) -> (i32, i32, i32, i32) {
     let field_top = PAD + HEADING + GAP;
-    let list_top = if pad_mode { field_top } else { field_top + FIELD_HEIGHT + GAP };
+    let list_top = field_top + FIELD_HEIGHT + GAP;
     let hint_top = list_top + rows as i32 * ROW + if rows > 0 { GAP / 2 } else { 0 };
     (field_top, list_top, hint_top, hint_top + HINT + PAD - 4)
 }
@@ -173,18 +190,19 @@ unsafe fn create(owner: HWND) -> Option<State> {
         field_brush: CreateSolidBrush(COLORREF(FIELD)),
         old_edit_proc,
         results: Vec::new(),
-        opened_at: 0,
         presets: Vec::new(),
         selected: None,
-        pad: false,
+        focused: false,
+        focused_at: 0,
+        countdown: false,
         stepped_at: 0,
     })
 }
 
-/// Shows the box for marker `id`; `heading` says which marker ("Метка 3 · 12:41").
-/// `pad`: opened from the gamepad (see the module notes). A box that is already open is
-/// closed first, keeping what was chosen there.
-pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], pad: bool) {
+/// Shows the card for marker `id`; `heading` says which marker ("Метка 3 · 12:41").
+/// `from_pad`: the gamepad asked for it (no focus taken, countdown; see the module notes).
+/// A card that is already open is closed first, keeping what was in its field.
+pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], from_pad: bool) {
     if is_open() {
         finish(true);
     }
@@ -196,19 +214,18 @@ pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], pad: bool) 
         STATE.with(|cell| *cell.borrow_mut() = made);
     }
     let presets: Vec<String> = presets.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).take(8).collect();
-    let pad = pad && !presets.is_empty(); // nothing to pick from: the field is the only way
     let plan = STATE.with(|cell| unsafe {
         let mut slot = cell.borrow_mut();
         let s = slot.as_mut()?;
         s.owner = owner;
         s.id = Some(id);
-        s.opened_at = GetTickCount64();
-        s.stepped_at = s.opened_at;
         s.heading = heading.encode_utf16().collect();
         s.previous = GetForegroundWindow();
-        s.pad = pad;
-        s.selected = if pad { Some(0) } else { None };
         s.presets = presets;
+        s.focused = false;
+        s.countdown = from_pad && !s.presets.is_empty();
+        s.selected = if s.countdown { Some(0) } else { None };
+        s.stepped_at = GetTickCount64();
 
         // Top middle of the screen the game is on.
         let monitor = MonitorFromWindow(s.previous, MONITOR_DEFAULTTOPRIMARY);
@@ -228,44 +245,49 @@ pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], pad: bool) 
             }
             s.fonts = Some((font(scale(14, s.dpi), 600), font(scale(15, s.dpi), 400), font(scale(12, s.dpi), 400)));
         }
-        let rows = s.presets.len() + usize::from(pad); // gamepad: plus "Без заголовка"
-        let (field_top, _, _, height) = layout(pad, rows);
+        let (field_top, _, _, height) = layout(rows(s));
         let (w, h) = (scale(WIDTH, s.dpi), scale(height, s.dpi));
         let x = (info.rcMonitor.left + info.rcMonitor.right - w) / 2;
         let y = info.rcMonitor.top + scale(48, s.dpi);
-        let (pad_px, field) = (scale(PAD, s.dpi), scale(FIELD_HEIGHT, s.dpi));
+        let (pad, field) = (scale(PAD, s.dpi), scale(FIELD_HEIGHT, s.dpi));
         let inner = scale(8, s.dpi);
         let line = scale(20, s.dpi);
         let text_font = s.fonts.map(|(_, f, _)| f).unwrap_or_default();
         // The field: the edit control sits inside a drawn rounded box, padded.
-        let edit_rc = (pad_px + inner, scale(field_top, s.dpi) + (field - line) / 2, w - 2 * (pad_px + inner), line);
-        Some((s.hwnd, s.edit, text_font, edit_rc, (x, y, w, h), pad))
+        let edit_rc = (pad + inner, scale(field_top, s.dpi) + (field - line) / 2, w - 2 * (pad + inner), line);
+        let first = s.selected.map(|i| row_text(s, i)).unwrap_or_default();
+        Some((s.hwnd, s.edit, text_font, edit_rc, (x, y, w, h), s.countdown, first))
     });
-    let Some((hwnd, edit, text_font, (ex, ey, ew, eh), (x, y, w, h), pad)) = plan else { return };
+    let Some((hwnd, edit, text_font, (ex, ey, ew, eh), (x, y, w, h), countdown, first)) = plan else { return };
     unsafe {
-        // A gamepad card must not take the focus from the game, not even by a click.
-        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let wanted = if pad { style | WS_EX_NOACTIVATE.0 } else { style & !WS_EX_NOACTIVATE.0 };
-        if wanted != style {
-            SetWindowLongW(hwnd, GWL_EXSTYLE, wanted as i32);
-        }
         SendMessageW(edit, WM_SETFONT, Some(WPARAM(text_font.0 as usize)), Some(LPARAM(1)));
         let _ = SetWindowPos(edit, None, ex, ey, ew, eh, Default::default());
-        let _ = SetWindowTextW(edit, w!(""));
-        let _ = ShowWindow(edit, if pad { SW_HIDE } else { SW_SHOW });
+        set_field(edit, &first);
         let _ = InvalidateRect(Some(hwnd), None, true);
-        if pad {
+        if countdown {
+            // Shown without taking the focus from the game, not even when clicked (a click
+            // asks for the field instead, see WM_MOUSEACTIVATE).
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_NOACTIVATE.0) as i32);
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             SetTimer(Some(hwnd), TIMER_PICK, PICK_MS, None);
             SetTimer(Some(hwnd), TIMER_BAR, 50, None);
         } else {
             let _ = KillTimer(Some(hwnd), TIMER_PICK);
             let _ = KillTimer(Some(hwnd), TIMER_BAR);
-            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW);
-            take_focus(hwnd);
-            let _ = SetFocus(Some(edit));
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
         }
     }
+    if !countdown {
+        focus_field();
+    }
+}
+
+unsafe fn set_field(edit: HWND, text: &str) {
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
+    let end = wide.len() - 1;
+    SendMessageW(edit, 0x00B1 /* EM_SETSEL */, Some(WPARAM(end)), Some(LPARAM(end as isize)));
 }
 
 /// Windows lets a background program take focus only in some cases; joining the input of
@@ -289,82 +311,92 @@ pub fn is_open() -> bool {
     STATE.with(|cell| cell.borrow().as_ref().is_some_and(|s| s.id.is_some()))
 }
 
-/// The gamepad card is open (its combination steps through the presets).
-pub fn is_pad_open() -> bool {
-    STATE.with(|cell| cell.borrow().as_ref().is_some_and(|s| s.id.is_some() && s.pad))
-}
-
-/// Gamepad: highlight the next preset (after the last one comes "no title") and start the
-/// countdown again.
-pub fn next() {
-    let hwnd = STATE.with(|cell| {
+/// The field takes the focus to be typed in; the countdown stops. Used when the card is
+/// opened from the keyboard, clicked, or asked for with the keyboard shortcut while it is up.
+pub fn focus_field() {
+    let plan = STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let s = slot.as_mut().filter(|s| s.id.is_some() && s.pad)?;
-        let count = s.presets.len() + 1;
-        s.selected = Some((s.selected.unwrap_or(0) + 1) % count);
-        s.stepped_at = unsafe { GetTickCount64() };
-        Some(s.hwnd)
+        let s = slot.as_mut().filter(|s| s.id.is_some())?;
+        s.countdown = false;
+        s.focused = true;
+        s.focused_at = unsafe { GetTickCount64() };
+        Some((s.hwnd, s.edit))
     });
-    if let Some(hwnd) = hwnd {
-        unsafe {
-            SetTimer(Some(hwnd), TIMER_PICK, PICK_MS, None);
-            let _ = InvalidateRect(Some(hwnd), None, true);
+    let Some((hwnd, edit)) = plan else { return };
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_PICK);
+        let _ = KillTimer(Some(hwnd), TIMER_BAR);
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if style & WS_EX_NOACTIVATE.0 != 0 {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !WS_EX_NOACTIVATE.0) as i32);
         }
+        take_focus(hwnd);
+        let _ = SetFocus(Some(edit));
+        let _ = InvalidateRect(Some(hwnd), None, true);
     }
 }
 
-/// Keyboard: ↑/↓ put a preset into the field.
-fn step_preset(up: bool) {
-    let pick = STATE.with(|cell| {
+/// Highlights the row `delta` away (wrapping) and puts its title into the field; on a card
+/// opened from the gamepad the countdown starts again.
+pub fn step(delta: i32) {
+    let plan = STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let s = slot.as_mut().filter(|s| s.id.is_some() && !s.presets.is_empty())?;
-        let n = s.presets.len();
-        let i = match (s.selected, up) {
-            (None, false) => 0,
-            (None, true) => n - 1,
-            (Some(i), false) => (i + 1) % n,
-            (Some(i), true) => (i + n - 1) % n,
-        };
+        let s = slot.as_mut().filter(|s| s.id.is_some())?;
+        let count = rows(s) as i32;
+        if count == 0 {
+            return None;
+        }
+        let i = match s.selected {
+            Some(i) => (i as i32 + delta).rem_euclid(count),
+            None if delta > 0 => 0,
+            None => count - 1,
+        } as usize;
         s.selected = Some(i);
-        Some((s.hwnd, s.edit, s.presets[i].clone()))
+        s.stepped_at = unsafe { GetTickCount64() };
+        Some((s.hwnd, s.edit, row_text(s, i), s.countdown))
     });
-    if let Some((hwnd, edit, text)) = pick {
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    if let Some((hwnd, edit, text, countdown)) = plan {
         unsafe {
-            let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
-            SendMessageW(edit, 0x00B1 /* EM_SETSEL */, Some(WPARAM(wide.len())), Some(LPARAM(wide.len() as isize)));
+            set_field(edit, &text);
+            if countdown {
+                SetTimer(Some(hwnd), TIMER_PICK, PICK_MS, None);
+            }
             let _ = InvalidateRect(Some(hwnd), None, true);
         }
     }
 }
 
-/// Closes the box. `keep`: store the choice (Enter, focus lost, gamepad countdown); else no
-/// title (Esc).
+/// Keeps what is in the field now (gamepad A).
+pub fn choose() {
+    if is_open() {
+        finish(true);
+    }
+}
+
+/// Closes the card. `keep`: the field's text becomes the title (Enter, A, countdown, focus
+/// lost); else no title (Esc).
 fn finish(keep: bool) {
-    // Taking the id first makes the box count as closed for the messages the calls below cause.
+    // Taking the id first makes the card count as closed for the messages the calls below cause.
     let open = STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let s = slot.as_mut()?;
         let id = s.id.take()?;
-        let picked = if s.pad { s.selected.and_then(|i| s.presets.get(i).cloned()) } else { None };
-        Some((id, s.hwnd, s.edit, s.previous, s.owner, s.pad, picked))
+        let focused = std::mem::take(&mut s.focused);
+        s.countdown = false;
+        Some((id, s.hwnd, s.edit, s.previous, s.owner, focused))
     });
-    let Some((id, hwnd, edit, previous, owner, pad, picked)) = open else { return };
+    let Some((id, hwnd, edit, previous, owner, focused)) = open else { return };
     unsafe {
         let _ = KillTimer(Some(hwnd), TIMER_PICK);
         let _ = KillTimer(Some(hwnd), TIMER_BAR);
         let mut text = None;
         if keep {
-            if pad {
-                text = picked;
-            } else {
-                let len = GetWindowTextLengthW(edit);
-                let mut buf = vec![0u16; len as usize + 1];
-                let got = GetWindowTextW(edit, &mut buf);
-                let typed = String::from_utf16_lossy(&buf[..got.max(0) as usize]).trim().to_string();
-                if !typed.is_empty() {
-                    text = Some(typed);
-                }
+            let len = GetWindowTextLengthW(edit);
+            let mut buf = vec![0u16; len as usize + 1];
+            let got = GetWindowTextW(edit, &mut buf);
+            let typed = String::from_utf16_lossy(&buf[..got.max(0) as usize]).trim().to_string();
+            if !typed.is_empty() {
+                text = Some(typed);
             }
         }
         STATE.with(|cell| {
@@ -373,27 +405,24 @@ fn finish(keep: bool) {
             }
         });
         let _ = ShowWindow(hwnd, SW_HIDE);
-        // Back to the game (a gamepad card never had the focus).
-        if !pad && !previous.is_invalid() && IsWindow(Some(previous)).as_bool() {
+        // Back to the game, if the card took the focus from it.
+        if focused && !previous.is_invalid() && IsWindow(Some(previous)).as_bool() {
             let _ = SetForegroundWindow(previous);
         }
         let _ = PostMessageW(Some(owner), WM_NOTE_DONE, WPARAM(0), LPARAM(0));
     }
 }
 
-/// The outcome of the boxes that closed: marker id and title (None = no title).
+/// The outcome of the cards that closed: marker id and title (None = no title).
 pub fn take() -> Vec<(u64, Option<String>)> {
     STATE.with(|cell| cell.borrow_mut().as_mut().map(|s| std::mem::take(&mut s.results)).unwrap_or_default())
 }
 
-/// Test hook: types `text` into the open box and presses Enter.
+/// Test hook: types `text` into the open card and presses Enter.
 pub fn submit(text: &str) {
     let edit = STATE.with(|cell| cell.borrow().as_ref().filter(|s| s.id.is_some()).map(|s| s.edit));
     if let Some(edit) = edit {
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            let _ = SetWindowTextW(edit, PCWSTR(wide.as_ptr()));
-        }
+        unsafe { set_field(edit, text) };
         finish(true);
     }
 }
@@ -412,8 +441,8 @@ unsafe fn paint(hwnd: HWND) {
         let _ = DeleteObject(HGDIOBJ(bg.0));
         let Some((head_font, text_font, hint_font)) = s.fonts else { return };
         SetBkMode(dc, TRANSPARENT);
-        let rows = s.presets.len() + usize::from(s.pad);
-        let (field_top, list_top, hint_top, _) = layout(s.pad, rows);
+        let count = rows(s);
+        let (field_top, list_top, hint_top, _) = layout(count);
         let flags = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
 
         let old = SelectObject(dc, HGDIOBJ(head_font.0));
@@ -424,15 +453,12 @@ unsafe fn paint(hwnd: HWND) {
 
         let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
         let old_brush = SelectObject(dc, HGDIOBJ(s.field_brush.0));
-        if !s.pad {
-            let r = d(8);
-            let _ = RoundRect(dc, d(PAD), d(field_top), rc.right - d(PAD) + 1, d(field_top + FIELD_HEIGHT) + 1, r, r);
-        }
-        // The presets (gamepad: plus "no title" at the end), the highlighted one marked.
+        let r = d(8);
+        let _ = RoundRect(dc, d(PAD), d(field_top), rc.right - d(PAD) + 1, d(field_top + FIELD_HEIGHT) + 1, r, r);
+        // The presets and "no title", the highlighted one marked.
         SelectObject(dc, HGDIOBJ(text_font.0));
         let accent = CreateSolidBrush(COLORREF(ACCENT));
-        for i in 0..rows {
-            let label = s.presets.get(i).cloned().unwrap_or_else(|| "Без заголовка".to_string());
+        for i in 0..count {
             let y = d(list_top + i as i32 * ROW);
             let row = RECT { left: d(PAD), top: y, right: rc.right - d(PAD), bottom: y + d(ROW - 2) };
             let chosen = s.selected == Some(i);
@@ -441,13 +467,15 @@ unsafe fn paint(hwnd: HWND) {
                 let r = d(6);
                 let _ = RoundRect(dc, row.left, row.top, row.right + 1, row.bottom + 1, r, r);
             }
-            SetTextColor(dc, COLORREF(if chosen { TITLE } else if i < s.presets.len() { TITLE } else { DETAIL }));
+            let preset = i < s.presets.len();
+            SetTextColor(dc, COLORREF(if chosen || preset { TITLE } else { DETAIL }));
+            let label = if preset { s.presets[i].clone() } else { "Без заголовка".to_string() };
             let mut text: Vec<u16> = label.encode_utf16().collect();
             let mut text_rc = RECT { left: row.left + d(10), right: row.right - d(10), ..row };
             DrawTextW(dc, &mut text, &mut text_rc, flags);
         }
-        // Gamepad: a bar that runs out when the highlighted title is taken.
-        if s.pad {
+        // Opened from the gamepad: a bar along the bottom that runs out when the title is taken.
+        if s.countdown {
             let left = (PICK_MS as u64).saturating_sub(GetTickCount64().saturating_sub(s.stepped_at)) as f64 / PICK_MS as f64;
             let full = rc.right - 2 * d(PAD);
             let bar = RECT { left: d(PAD), top: rc.bottom - d(3), right: d(PAD) + (full as f64 * left) as i32, bottom: rc.bottom - d(1) };
@@ -459,9 +487,9 @@ unsafe fn paint(hwnd: HWND) {
 
         SelectObject(dc, HGDIOBJ(hint_font.0));
         SetTextColor(dc, COLORREF(DETAIL));
-        let hint = if s.pad {
-            "Сочетание ещё раз — следующий · через 3 с выберется выделенный"
-        } else if s.presets.is_empty() {
+        let hint = if s.countdown {
+            "Сочетание — дальше · A — сохранить · щелчок — свой текст"
+        } else if count == 0 {
             "Enter — сохранить · Esc — без заголовка"
         } else {
             "↑↓ — заготовки · Enter — сохранить · Esc — без заголовка"
@@ -481,14 +509,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_PICK => {
-            finish(true); // the gamepad countdown ran out: take the highlighted title
+            choose(); // the gamepad countdown ran out: keep what is in the field
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_BAR => {
             let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
-        WM_MOUSEACTIVATE if is_pad_open() => LRESULT(MA_NOACTIVATE as isize),
+        // A click on a card that has not got the focus: the user wants to type.
+        WM_MOUSEACTIVATE => {
+            let focused = STATE.with(|cell| cell.borrow().as_ref().is_some_and(|s| s.focused));
+            if is_open() && !focused {
+                focus_field();
+            }
+            LRESULT(MA_ACTIVATE as isize)
+        }
         WM_CTLCOLOREDIT => {
             let dc = HDC(wparam.0 as _);
             SetTextColor(dc, COLORREF(TITLE));
@@ -497,24 +532,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(brush.0 as isize)
         }
         WM_ACTIVATE => {
-            // Clicked away: keep what was typed.
-            if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && is_open() && !is_pad_open() {
-                let opened = STATE.with(|cell| cell.borrow().as_ref().map_or(0, |s| s.opened_at));
-                let age = GetTickCount64().saturating_sub(opened);
-                // Test scripts start a process per command, which takes the focus: with
-                // REWIND_DEBUG the box waits for Enter/Esc (or the test hook) instead.
-                if std::env::var_os("REWIND_DEBUG").is_some() {
-                    return LRESULT(0);
-                }
-                if age < 600 {
-                    // Windows is still shuffling focus after the box appeared: take it back.
-                    let edit = STATE.with(|cell| cell.borrow().as_ref().map(|s| s.edit));
-                    take_focus(hwnd);
-                    if let Some(edit) = edit {
-                        let _ = SetFocus(Some(edit));
+            // Clicked away from the field: keep what was typed.
+            let state = STATE.with(|cell| cell.borrow().as_ref().map(|s| (s.focused, s.focused_at)));
+            if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && is_open() {
+                if let Some((true, since)) = state {
+                    // Test scripts start a process per command, which takes the focus: with
+                    // REWIND_DEBUG the card waits for Enter/Esc (or the test hook) instead.
+                    if std::env::var_os("REWIND_DEBUG").is_some() {
+                        return LRESULT(0);
                     }
-                } else {
-                    finish(true);
+                    if GetTickCount64().saturating_sub(since) < 600 {
+                        // Windows is still shuffling focus after the field took it: take it back.
+                        let edit = STATE.with(|cell| cell.borrow().as_ref().map(|s| s.edit));
+                        take_focus(hwnd);
+                        if let Some(edit) = edit {
+                            let _ = SetFocus(Some(edit));
+                        }
+                    } else {
+                        finish(true);
+                    }
                 }
             }
             LRESULT(0)
@@ -529,7 +565,7 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         return LRESULT(0);
     }
     if msg == WM_KEYDOWN && (wparam.0 == VK_UP.0 as usize || wparam.0 == VK_DOWN.0 as usize) {
-        step_preset(wparam.0 == VK_UP.0 as usize);
+        step(if wparam.0 == VK_UP.0 as usize { -1 } else { 1 });
         return LRESULT(0);
     }
     if msg == WM_CHAR && (wparam.0 == 13 || wparam.0 == 27) {

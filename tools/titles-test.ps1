@@ -1,8 +1,11 @@
-# End-to-end check of preset marker titles and the search on the Records tab.
-# Gamepad: "pad 6" acts as the combination for "marker with title" (a script cannot press a
-# gamepad); the card must not take the focus, the same combination steps through the presets
-# and the highlighted one is taken after 3 s. Keyboard: arrows in the title field pick a
-# preset. Text stays ASCII (PowerShell 5 reads scripts as ANSI), so the presets are English.
+# End-to-end check of the marker title card (one card for gamepad and keyboard) and the
+# search on the Records tab. Gamepad: "pad 6" acts as the combination for "marker with title"
+# and "pad_nav 4096" as A (a script cannot press a gamepad). Opened from the gamepad the card
+# must not take the focus; the same combination steps through the presets (putting each into
+# the field), A keeps the field at once, and after 3 s it is kept anyway. The keyboard
+# shortcut while the card is up gives the field the focus and stops the countdown. Keyboard:
+# arrows pick a preset. Text stays ASCII (PowerShell 5 reads scripts as ANSI), so the
+# presets are English.
 # Usage: titles-test.ps1 -Data <empty test data folder>
 param(
     [Parameter(Mandatory)] [string]$Data,
@@ -37,7 +40,8 @@ Send record; Start-Sleep 2; Send record; Start-Sleep 2
 $before = [W.N]::GetForegroundWindow()
 Send 'pad 6'; Start-Sleep -Milliseconds 700
 $note = Note
-Check 'gamepad: the title card appears' ($note -ne [IntPtr]::Zero -and [W.N]::IsWindowVisible($note))
+$edit = [W.N]::FindWindowExW($note, [IntPtr]::Zero, 'Edit', [NullString]::Value)
+Check 'gamepad: the title card appears, with its field' ($note -ne [IntPtr]::Zero -and [W.N]::IsWindowVisible($note) -and [W.N]::IsWindowVisible($edit))
 Check 'gamepad: the card does not take the focus from the game' ([W.N]::GetForegroundWindow() -ne $note)
 & "$PSScriptRoot\ui-shot.ps1" -Out "$Data\pad-card.png" -Margin 20 -Class RewindNote | Out-Null
 Send 'pad 6'; Start-Sleep 4.5
@@ -47,6 +51,18 @@ Check 'gamepad: the card closes by itself after the countdown' (-not [W.N]::IsWi
 Send 'pad 6'; Start-Sleep -Milliseconds 500
 foreach ($i in 1..4) { Send 'pad 6'; Start-Sleep -Milliseconds 300 }
 Start-Sleep 4.5
+
+# --- gamepad: A keeps the field at once (Bug -> Funny, then A)
+Send 'pad 6'; Start-Sleep -Milliseconds 500
+Send 'pad 6'; Start-Sleep -Milliseconds 300
+Send 'pad_nav 4096'; Start-Sleep -Milliseconds 500
+Check 'gamepad: A keeps the title at once, no waiting' (-not [W.N]::IsWindowVisible((Note)))
+
+# --- opened from the gamepad, then the keyboard shortcut: the field is for typing now
+Send 'pad 6'; Start-Sleep -Milliseconds 500
+Send mark_note; Start-Sleep 4.5      # the shortcut again (not a new marker); the countdown stops
+Check 'keyboard shortcut on an open card stops the countdown (still open after 4.5 s)' ([W.N]::IsWindowVisible((Note)))
+Send 'note_submit Typed later'; Start-Sleep 1
 
 # --- keyboard: arrows pick a preset (Down x3 = Epic), Enter keeps it
 Send mark_note; Start-Sleep 1
@@ -60,7 +76,7 @@ Send save; Start-Sleep 3
 $clip = Get-ChildItem "$Data\out" -Filter *.mp4 | Sort-Object CreationTime | Select-Object -Last 1
 $marks = @((Get-Content -LiteralPath ([IO.Path]::ChangeExtension($clip.FullName, 'markers.json')) -Raw -Encoding UTF8 | ConvertFrom-Json).markers)
 $titles = ($marks | ForEach-Object { if ($_.title) { $_.title } else { '-' } }) -join ', '
-Check "titles: gamepad picked Funny, then no title, keyboard picked Epic ($titles)" ($titles -eq 'Funny, -, Epic')
+Check "titles: countdown Funny, no title, A Funny, typed, keyboard Epic ($titles)" ($titles -eq 'Funny, -, Funny, Typed later, Epic')
 
 # --- presets are edited on the Keys tab
 Send show; Start-Sleep 4

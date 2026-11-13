@@ -450,6 +450,23 @@ pub fn rewrite_chapters(path: &Path, progress: &mut dyn FnMut(f64)) -> Result<()
     if !inside(path) {
         bail!("not a file in the recordings folder");
     }
+    // Usually the chapters are written into the file in place, in milliseconds (see
+    // mp4chapters); only a file laid out differently is copied anew.
+    let (secs, _) = duration(path);
+    let chapters = crate::marks::chapters(&crate::marks::load(path), secs);
+    match crate::mp4chapters::write(path, &chapters) {
+        Ok(()) => {
+            progress(1.0);
+            return Ok(());
+        }
+        Err(e) if e.to_string().contains("открыт в другой программе") => return Err(e),
+        Err(e) => crate::log::line(&format!("chapters not written in place ({e:#}), copying {} instead", path.display())),
+    }
+    copy_with_chapters(path, progress)
+}
+
+/// The slow way: copies the video into a new file with the chapters (no re-encoding).
+fn copy_with_chapters(path: &Path, progress: &mut dyn FnMut(f64)) -> Result<()> {
     let meta = std::fs::metadata(path)?;
     let tmp = path.with_extension("rewind-tmp.mp4");
     let result = unsafe { cut(path, &tmp, 0.0, f64::INFINITY, &crate::marks::load(path), progress) };

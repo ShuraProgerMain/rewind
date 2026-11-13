@@ -97,7 +97,7 @@ Js "document.querySelector('[data-tab=files]').click()"
 Start-Sleep 1
 Js "document.querySelector('[data-op=marks]').click()"
 & "$PSScriptRoot\ui-shot.ps1" -Out "$Data\files-marks.png" -Margin 24 | Out-Null
-Js "{ const f = document.querySelector('[data-mark-title]'); f.focus(); f.value = 'Typed on the page'; f.blur(); }"
+Js "{ const f = document.querySelector('[data-mark-title]'); f.value = 'Typed on the page'; commitMark(f); }"
 Start-Sleep 7   # a file held for a moment (as Explorer does) is retried for up to 5 s
 $m = @(Marks $rec)
 Check 'title edited on the page is saved' (@($m | Where-Object { $_.title -eq 'Typed on the page' }).Count -eq 1)
@@ -110,7 +110,7 @@ Check "...without growing extra tracks ($(@($i.streams).Count) tracks)" (@($i.st
 function Pill { Js "send({t: 'log', text: 'pill: ' + document.querySelector('.pill').className + ' / ' + document.querySelector('.pill .st').textContent})"; (Select-String -Path "$Data\rewind.log" -Pattern 'pill: (.*)' | Select-Object -Last 1).Matches[0].Groups[1].Value }
 $state = Pill
 Check "status says the markers are in the video ($state)" ($state -match '\bok\b')
-$lock = [IO.File]::Open($rec.FullName, 'Open', 'Read', 'ReadWrite')   # like a player: no renaming meanwhile
+$lock = [IO.File]::Open($rec.FullName, 'Open', 'Read', 'Read')   # a program that lets nobody write meanwhile
 # (the window is in the background here, where focus events do not fire: commit directly)
 Js "{ const f = document.querySelector('[data-mark-title]'); f.value = 'Locked title'; commitMark(f); }"
 Start-Sleep 8   # Rewind keeps trying for 5 s before it gives up

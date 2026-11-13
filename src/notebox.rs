@@ -13,6 +13,10 @@
 //!   is up, the field takes the focus and the countdown stops: type, Enter keeps it, Esc
 //!   leaves the marker untitled, clicking elsewhere keeps what was typed. Focus then goes
 //!   back to the game.
+//! * On a card opened from the gamepad one can also just start typing: while the card is up
+//!   and the game has the focus, a keyboard hook catches the keys (they do not reach the
+//!   game). The first letter takes the field the focus and replaces the preset there; Enter
+//!   keeps the field, Esc leaves the marker untitled. Keys with Ctrl or Alt pass through.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -30,7 +34,14 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, GetKeyState, GetKeyboardLayout, SetFocus, ToUnicodeEx, VK_CAPITAL, VK_CONTROL, VK_DOWN,
+    VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT, VK_UP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CallWindowProcW, CreateWindowExW, DefWindowProcW, GetClientRect, GetForegroundWindow,
     GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, KillTimer, PostMessageW,
@@ -44,6 +55,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Posted to the owner when the card closes; `take()` then gives the marker id and title
 /// (None = closed without a title).
 pub const WM_NOTE_DONE: u32 = WM_APP + 14;
+/// From the keyboard hook to the card: a key caught while the game had the focus.
+/// wparam = virtual key, lparam = scan code | Shift << 16.
+const WM_CAUGHT_KEY: u32 = WM_APP + 20;
 
 const WIDTH: i32 = 440;
 const PAD: i32 = 16;
@@ -94,6 +108,99 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    /// The keyboard hook, while a card opened from the gamepad is up without the focus.
+    static HOOK: RefCell<Option<HHOOK>> = const { RefCell::new(None) };
+    /// The card window, for the hook to post to.
+    static CARD: RefCell<isize> = const { RefCell::new(0) };
+}
+
+/// Keys that type something (letters, digits, space, punctuation, numpad digits).
+fn types_text(vk: u32) -> bool {
+    matches!(vk, 0x20 | 0x30..=0x39 | 0x41..=0x5A | 0x60..=0x6F | 0xBA..=0xC0 | 0xDB..=0xDF | 0xE2)
+}
+
+unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let card = HWND(CARD.with(|c| *c.borrow()) as _);
+        let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let vk = info.vkCode;
+        let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
+        let held = |k: u16| GetAsyncKeyState(k as i32) as u16 & 0x8000 != 0;
+        let chord = held(VK_CONTROL.0) || held(VK_MENU.0) || held(VK_LWIN.0) || held(VK_RWIN.0);
+        // Only while the game has the focus: once the field has it, keys go there anyway.
+        if !card.is_invalid() && GetForegroundWindow() != card && !chord && (down || up) {
+            let ours = types_text(vk) || vk == VK_RETURN.0 as u32 || vk == VK_ESCAPE.0 as u32;
+            if ours {
+                if down {
+                    let shift = held(VK_SHIFT.0) as isize;
+                    let _ = PostMessageW(Some(card), WM_CAUGHT_KEY, WPARAM(vk as usize), LPARAM(info.scanCode as isize | shift << 16));
+                }
+                return LRESULT(1); // the game does not get it (its release neither)
+            }
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+fn set_hook(on: bool) {
+    HOOK.with(|h| unsafe {
+        let mut hook = h.borrow_mut();
+        match (on, hook.is_some()) {
+            (true, false) => {
+                let module = GetModuleHandleW(None).ok();
+                *hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module.map(|m| m.into()), 0) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        crate::log::line(&format!("keyboard hook for the title card not set: {e}"));
+                        None
+                    }
+                };
+            }
+            (false, true) => {
+                if let Some(old) = hook.take() {
+                    let _ = UnhookWindowsHookEx(old);
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+/// A key caught by the hook: Enter/Esc close the card, a letter starts typing.
+fn caught_key(vk: u32, scan: u32, shift: bool) {
+    if vk == VK_RETURN.0 as u32 || vk == VK_ESCAPE.0 as u32 {
+        finish(vk == VK_RETURN.0 as u32);
+        return;
+    }
+    let plan = STATE.with(|cell| {
+        let slot = cell.borrow();
+        let s = slot.as_ref().filter(|s| s.id.is_some())?;
+        Some((s.edit, s.previous, s.focused))
+    });
+    let Some((edit, previous, focused)) = plan else { return };
+    unsafe {
+        // The character as the game's keyboard layout makes it.
+        let layout = GetKeyboardLayout(GetWindowThreadProcessId(previous, None));
+        let mut keys = [0u8; 256];
+        if shift {
+            keys[VK_SHIFT.0 as usize] = 0x80;
+        }
+        if GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0 {
+            keys[VK_CAPITAL.0 as usize] = 0x01;
+        }
+        let mut buf = [0u16; 8];
+        let n = ToUnicodeEx(vk, scan, &keys, &mut buf, 0, Some(layout));
+        if !focused {
+            focus_field();
+            // The preset that was in the field gives way to what is being typed.
+            SendMessageW(edit, 0x00B1 /* EM_SETSEL */, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+        if n > 0 {
+            let text: Vec<u16> = buf[..n as usize].iter().copied().chain(Some(0)).collect();
+            SendMessageW(edit, 0x00C2 /* EM_REPLACESEL */, Some(WPARAM(1)), Some(LPARAM(text.as_ptr() as isize)));
+        }
+    }
 }
 
 fn scale(v: i32, dpi: u32) -> i32 {
@@ -256,6 +363,7 @@ pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], from_pad: b
         // The field: the edit control sits inside a drawn rounded box, padded.
         let edit_rc = (pad + inner, scale(field_top, s.dpi) + (field - line) / 2, w - 2 * (pad + inner), line);
         let first = s.selected.map(|i| row_text(s, i)).unwrap_or_default();
+        CARD.with(|c| *c.borrow_mut() = s.hwnd.0 as isize);
         Some((s.hwnd, s.edit, text_font, edit_rc, (x, y, w, h), s.countdown, first))
     });
     let Some((hwnd, edit, text_font, (ex, ey, ew, eh), (x, y, w, h), countdown, first)) = plan else { return };
@@ -272,6 +380,7 @@ pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], from_pad: b
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             SetTimer(Some(hwnd), TIMER_PICK, PICK_MS, None);
             SetTimer(Some(hwnd), TIMER_BAR, 50, None);
+            set_hook(true);
         } else {
             let _ = KillTimer(Some(hwnd), TIMER_PICK);
             let _ = KillTimer(Some(hwnd), TIMER_BAR);
@@ -386,6 +495,7 @@ fn finish(keep: bool) {
         Some((id, s.hwnd, s.edit, s.previous, s.owner, focused))
     });
     let Some((id, hwnd, edit, previous, owner, focused)) = open else { return };
+    set_hook(false);
     unsafe {
         let _ = KillTimer(Some(hwnd), TIMER_PICK);
         let _ = KillTimer(Some(hwnd), TIMER_BAR);
@@ -488,7 +598,7 @@ unsafe fn paint(hwnd: HWND) {
         SelectObject(dc, HGDIOBJ(hint_font.0));
         SetTextColor(dc, COLORREF(DETAIL));
         let hint = if s.countdown {
-            "Сочетание — дальше · A — сохранить · щелчок — свой текст"
+            "Сочетание — дальше · A — сохранить · печатайте — свой текст"
         } else if count == 0 {
             "Enter — сохранить · Esc — без заголовка"
         } else {
@@ -506,6 +616,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_PAINT => {
             paint(hwnd);
+            LRESULT(0)
+        }
+        WM_CAUGHT_KEY => {
+            caught_key(wparam.0 as u32, (lparam.0 & 0xFFFF) as u32, lparam.0 >> 16 & 1 != 0);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_PICK => {

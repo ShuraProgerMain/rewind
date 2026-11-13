@@ -25,6 +25,7 @@ mod ipc;
 mod library;
 mod log;
 mod marks;
+mod mp4chapters;
 mod notebox;
 mod mux;
 mod picker;

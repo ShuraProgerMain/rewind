@@ -64,6 +64,16 @@ Send mark_note; Start-Sleep 4.5      # the shortcut again (not a new marker); th
 Check 'keyboard shortcut on an open card stops the countdown (still open after 4.5 s)' ([W.N]::IsWindowVisible((Note)))
 Send 'note_submit Typed later'; Start-Sleep 1
 
+# --- gamepad card, then typing on the keyboard without clicking: the keyboard hook hands the
+# keys to the card (posted here as the hook would; real keys could land in another window)
+Send 'pad 6'; Start-Sleep -Milliseconds 600
+$note = Note
+foreach ($k in @(@(0x34, 0x05), @(0x32, 0x03))) { [void][W.N]::PostMessageW($note, 0x8014, [IntPtr]$k[0], [IntPtr]$k[1]); Start-Sleep -Milliseconds 200 }
+Start-Sleep 4   # longer than the countdown: typing must have stopped it
+Check 'typing on a gamepad card stops the countdown' ([W.N]::IsWindowVisible($note))
+[void][W.N]::PostMessageW($note, 0x8014, [IntPtr]0x0D, [IntPtr]0x1C); Start-Sleep 1
+Check '...and Enter keeps the typed title' (-not [W.N]::IsWindowVisible($note))
+
 # --- keyboard: arrows pick a preset (Down x3 = Epic), Enter keeps it
 Send mark_note; Start-Sleep 1
 $note = Note
@@ -76,7 +86,7 @@ Send save; Start-Sleep 3
 $clip = Get-ChildItem "$Data\out" -Filter *.mp4 | Sort-Object CreationTime | Select-Object -Last 1
 $marks = @((Get-Content -LiteralPath ([IO.Path]::ChangeExtension($clip.FullName, 'markers.json')) -Raw -Encoding UTF8 | ConvertFrom-Json).markers)
 $titles = ($marks | ForEach-Object { if ($_.title) { $_.title } else { '-' } }) -join ', '
-Check "titles: countdown Funny, no title, A Funny, typed, keyboard Epic ($titles)" ($titles -eq 'Funny, -, Funny, Typed later, Epic')
+Check "titles: countdown Funny, no title, A Funny, typed, typed 42, keyboard Epic ($titles)" ($titles -eq 'Funny, -, Funny, Typed later, 42, Epic')
 
 # --- presets are edited on the Keys tab
 Send show; Start-Sleep 4

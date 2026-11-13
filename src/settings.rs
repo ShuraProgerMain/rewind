@@ -109,6 +109,8 @@ pub struct Settings {
     pub audio_kbit: u32,
     pub hotkeys: Hotkeys,
     pub pad: PadKeys,
+    /// Ready-made marker titles, picked with the gamepad (or ↑/↓ in the title box).
+    pub mark_presets: Vec<String>,
     pub notifications: bool,
     /// On-screen pill: "recording" (while recording), "always" (also while the buffer runs) or "off".
     pub indicator: String,
@@ -141,6 +143,7 @@ impl Default for Settings {
             audio_kbit: 192,
             hotkeys: Hotkeys::default(),
             pad: PadKeys::default(),
+            mark_presets: ["Баг", "Смешно", "Эпично", "На шорт"].map(String::from).to_vec(),
             notifications: true,
             indicator: "recording".into(),
             autostart: false,

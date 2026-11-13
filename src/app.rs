@@ -162,7 +162,10 @@ struct App {
     /// waiting for its title box, titles typed, and the files each marker went into.
     mark_seq: u64,
     mark_count: u32,
-    mark_note: Option<u64>,
+    /// The marker waiting for its title box, and whether the gamepad asked for it.
+    mark_note: Option<(u64, bool)>,
+    /// The command being run came from a gamepad combination.
+    pad_trigger: bool,
     mark_titles: std::collections::HashMap<u64, String>,
     mark_files: std::collections::HashMap<u64, Vec<PathBuf>>,
     /// Videos whose chapters must be written again (a background worker takes them).
@@ -557,7 +560,7 @@ impl App {
         self.mark_seq = (now * 1000).max(self.mark_seq + 1);
         let id = self.mark_seq;
         if note {
-            self.mark_note = Some(id);
+            self.mark_note = Some((id, self.pad_trigger));
         }
         let _ = self.tx.send(Cmd::Mark(id));
     }
@@ -569,9 +572,9 @@ impl App {
             None => format!("Метка {} · в буфере", self.mark_count),
         };
         log::line(&format!("marked {id}: {heading}"));
-        if self.mark_note == Some(id) {
+        if let Some((_, pad)) = self.mark_note.filter(|(note, _)| *note == id) {
             self.mark_note = None;
-            crate::notebox::open(self.hwnd, id, &heading);
+            crate::notebox::open(self.hwnd, id, &heading, &self.settings.mark_presets, pad);
         } else if self.settings.notifications {
             let detail = if rec_secs.is_some() { "Войдёт в запись" } else { "Войдёт в клип, если сохранить буфер" };
             toast::show(Tone::Info, &heading, detail);
@@ -853,7 +856,7 @@ impl App {
     /// Sends the list of clips and recordings to the settings page, if it is open.
     fn push_files(&self) {
         if let Some(ui) = &self.ui {
-            let list = crate::library::list(60);
+            let list = crate::library::list(300);
             ui.eval(&format!("window.rewind&&window.rewind.files({})", serde_json::to_string(&list).unwrap_or("[]".into())));
         }
     }
@@ -1480,7 +1483,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         gamepad::WM_PAD => {
-            with_app(|app| app.on_command(wparam.0));
+            if wparam.0 == CMD_MARK_NOTE && crate::notebox::is_pad_open() {
+                crate::notebox::next(); // the same combination steps through the preset titles
+            } else {
+                with_app(|app| {
+                    app.pad_trigger = true;
+                    app.on_command(wparam.0);
+                    app.pad_trigger = false;
+                });
+            }
             LRESULT(0)
         }
         gamepad::WM_PAD_LEARNED => {
@@ -1804,6 +1815,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         mark_seq: 0,
         mark_count: 0,
         mark_note: None,
+        pad_trigger: false,
         mark_titles: Default::default(),
         mark_files: Default::default(),
         rewrite_tx,

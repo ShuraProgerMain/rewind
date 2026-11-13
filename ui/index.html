@@ -88,7 +88,15 @@ button { font: inherit; color: inherit; cursor: default; }
 .row.tall { padding: 7px 0; }
 
 /* ---------- recordings list ---------- */
-.list { height: 236px; overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
+.search { display: flex; align-items: center; gap: 8px; height: 30px; margin: 2px 0 6px; padding: 0 10px; border: 1px solid var(--input-edge); border-radius: 7px; background: var(--input); }
+.search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+.search svg { width: 14px; height: 14px; flex: none; fill: none; stroke: var(--secondary); stroke-width: 1.5; }
+.search input { flex: 1; min-width: 0; height: 26px; border: 0; outline: none; background: transparent; font: inherit; color: var(--label); }
+.search input::placeholder { color: var(--placeholder); }
+.search .icon-btn { width: 20px; height: 20px; }
+input.presets { width: 250px; height: 30px; padding: 0 9px; font: inherit; color: var(--label); background: var(--input); border: 1px solid var(--input-edge); border-radius: 6px; outline: none; }
+input.presets:focus { border-color: var(--accent); }
+.list { height: 200px; overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
 .list::-webkit-scrollbar { width: 6px; }
 .list::-webkit-scrollbar-thumb { background: var(--track); border-radius: 3px; }
 .day { font-size: 11px; line-height: 15px; color: var(--secondary); padding: 8px 0 4px; }
@@ -126,7 +134,7 @@ button { font: inherit; color: inherit; cursor: default; }
 .mrow:hover .icon-btn, .mrow:focus-within .icon-btn { opacity: 1; }
 .timeline .mk { position: absolute; top: 2px; width: 2px; height: 10px; margin-left: -1px; border-radius: 1px; background: var(--orange, #ff9f0a); pointer-events: none; }
 .file input { width: 100%; height: 24px; padding: 0 6px; font: inherit; font-weight: 600; color: var(--label); background: var(--input); border: 1px solid var(--accent); border-radius: 5px; outline: none; }
-.empty { height: 236px; display: grid; place-items: center; color: var(--secondary); text-align: center; }
+.empty { height: 200px; display: grid; place-items: center; color: var(--secondary); text-align: center; }
 
 /* ---------- trim view ---------- */
 #trim { display: none; padding: 0 18px; }
@@ -220,7 +228,7 @@ let S = {
   settings: { source: { type: "primary" }, crop: null, fps: 60, codec: "hevc", quality: 20, max_mbit: 100,
     buffer_seconds: 600, buffer_memory_mb: 4096, output_dir: "", cursor: true, system_sound: true, microphone: true,
     audio_kbit: 192, hotkeys: { save_clip: "Ctrl+Alt+F10", record: "Ctrl+Alt+F9", buffer: "Ctrl+Alt+F8", screenshot: "Ctrl+Alt+F11", marker: "Ctrl+Alt+F12", marker_note: "Ctrl+Alt+Shift+F12" },
-    pad: { save_clip: "LB+RB+L3+R3", record: "", buffer: "", screenshot: "", marker: "", marker_note: "" }, notifications: true },
+    pad: { save_clip: "LB+RB+L3+R3", record: "", buffer: "", screenshot: "", marker: "", marker_note: "" }, notifications: true, mark_presets: ["Баг", "Смешно", "Эпично", "На шорт"] },
   pad: { learning: null, pads: null, hint: "" },
   jobs: {},
   apps: [{ exe: "eldenring.exe", name: "ELDEN RING" }, { exe: "telegram.exe", name: "Telegram Desktop" }],
@@ -425,7 +433,7 @@ function padButton(id, name) {
   return `<button class="key pad ${learning ? "listening" : ""} ${value ? "" : "empty"}" data-pad="${id}" aria-label="Геймпад: ${esc(name)}" title="${esc(text)}">${PAD_ICON}<span>${esc(text)}</span></button>`;
 }
 function pageKeys() {
-  let note = "Нажмите на поле клавиатуры и затем на сочетание клавиш. Для геймпада нажмите на его поле, зажмите 2–4 кнопки сразу и отпустите: такое сочетание не нажать случайно в игре. Backspace убирает сочетание, Esc — отмена.";
+  let note = "Нажмите на поле, затем на клавиши — или зажмите 2–4 кнопки геймпада и отпустите. Backspace убирает, Esc — отмена.";
   if (padLearning()) {
     note = S.pad.pads === 0 ? '<span class="bad">Геймпад не найден. Подключите его в режиме Xbox (XInput)</span>'
       : S.pad.hint ? `<span class="bad">${esc(S.pad.hint)}</span>`
@@ -439,6 +447,8 @@ function pageKeys() {
     + keyRow("marker", "Поставить метку")
     + keyRow("marker_note", "Метка с заголовком")
     + keyRow("buffer", "Включить и выключить буфер")
+    + `<div class="row"><div class="name">Заготовки заголовков<small>Через запятую, выбор — тем же сочетанием или ↑↓</small></div>
+        <input class="presets" data-presets value="${esc((S.settings.mark_presets || []).join(", "))}" spellcheck="false" aria-label="Заготовки заголовков меток"></div>`
     + `<div class="note">${note}</div></div>`;
 }
 
@@ -448,6 +458,7 @@ const ICONS = {
   rename: '<svg viewBox="0 0 16 16"><path d="M10.6 2.8l2.6 2.6-7.4 7.4H3.2v-2.6zM9 4.4l2.6 2.6"/></svg>',
   scissors: '<svg viewBox="0 0 16 16"><circle cx="4.2" cy="12" r="2.2"/><circle cx="11.8" cy="12" r="2.2"/><path d="M5.6 10.2L11.5 2M10.4 10.2L4.5 2"/></svg>',
   pause: '<svg viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
+  search: '<svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>',
   chevron: '<svg class="chev" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>',
   trash: '<svg viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
@@ -532,20 +543,32 @@ function fileRow(f) {
     </div>${openMarks === f.path && f.markers && f.markers.length ? markRows(f) : ""}`;
 }
 
+let query = ""; // the search on the Records tab
+// A file matches when every word of the search is in its name, program, kind or a marker title.
+function matches(f, words) {
+  const kind = f.kind === "clip" ? "клип" : f.kind === "rec" ? "запись" : f.kind === "shot" ? "скриншот" : "видео";
+  const hay = [f.name, f.app, kind, ...(f.markers || []).map((m) => m.title || "")].join(" ").toLowerCase().replace(/ё/g, "е");
+  return words.every((w) => hay.includes(w));
+}
 function pageFiles() {
   const s = S.settings;
+  const words = query.toLowerCase().replace(/ё/g, "е").split(/\s+/).filter(Boolean);
+  const shown = (S.files || []).filter((f) => !words.length || matches(f, words));
+  const search = `<div class="search">${ICONS.search}<input data-search value="${esc(query)}" placeholder="Поиск: игра, название, заголовок метки" spellcheck="false" aria-label="Поиск по записям">${query ? `<button class="icon-btn" data-clear-search aria-label="Очистить поиск" title="Очистить">${ICONS.close}</button>` : ""}</div>`;
   let list;
   if (!S.files) list = '<div class="empty">Загружаю…</div>';
   else if (!S.files.length) list = '<div class="empty">Здесь появятся клипы, записи и скриншоты.<br>Сохраните клип или начните запись.</div>';
+  else if (!shown.length) list = `<div class="empty">Ничего не нашлось по «${esc(query.trim())}»</div>`;
   else {
     let day = "", rows = "";
-    for (const f of S.files) {
+    for (const f of shown) {
       const d = dayTitle(f.time);
       if (d !== day) { rows += `<div class="day">${esc(d)}</div>`; day = d; }
       rows += fileRow(f);
     }
     list = `<div class="list" aria-label="Клипы и записи">${rows}</div>`;
   }
+  if (S.files && S.files.length) list = search + list;
   return `${list}
     <div class="row"><div class="name">Папка<small title="${esc(S.folder)}">${esc(shortPath(S.folder, 52))}</small></div>
       <button class="push small" data-cmd="open_folder">Открыть</button>
@@ -790,8 +813,27 @@ document.addEventListener("focusout", (e) => {
   if (e.target.dataset && e.target.dataset.rename && renaming) finishRename(e.target, true);
 });
 
+// ---------- search and preset titles ----------
+document.addEventListener("input", (e) => {
+  if (e.target.dataset && "search" in e.target.dataset) { query = e.target.value; render(); }
+});
+document.addEventListener("change", (e) => {
+  if (!(e.target.dataset && "presets" in e.target.dataset)) return;
+  const list = e.target.value.split(",").map((t) => t.trim()).filter(Boolean).slice(0, 8);
+  set({ mark_presets: list });
+});
+document.addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t.dataset && "search" in t.dataset && e.key === "Escape" && query) { e.preventDefault(); query = ""; render(); t.focus(); }
+  if (t.dataset && "presets" in t.dataset && e.key === "Enter") { e.preventDefault(); t.blur(); }
+}, true);
+document.addEventListener("click", (e) => {
+  if (e.target.closest && e.target.closest("[data-clear-search]")) { query = ""; render(); const f = document.querySelector("[data-search]"); if (f) f.focus(); }
+}, true);
+
 // ---------- marker titles ----------
-function editingMark() { const a = document.activeElement; return !!(a && a.dataset && "markTitle" in a.dataset); }
+// A field whose text would be lost if the page were drawn again under it.
+function editingMark() { const a = document.activeElement; return !!(a && a.dataset && ("markTitle" in a.dataset || "presets" in a.dataset)); }
 function commitMark(field) {
   const row = field.closest("[data-mark]");
   const f = (S.files || []).find((x) => x.path === row.dataset.path);

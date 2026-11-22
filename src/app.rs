@@ -80,7 +80,13 @@ struct Job {
 const ACT_OPEN: usize = 1;
 const ACT_REVEAL: usize = 2;
 const ACT_TRIM: usize = 3;
+// Buttons of the "record the game's window?" notification.
+const ACT_GAME_YES: usize = 10;
+const ACT_GAME_NEVER: usize = 11;
 const TIMER_UPDATE: usize = 1;
+/// Looks at the window in front for a game in full screen.
+const TIMER_GAME: usize = 2;
+const GAME_CHECK_MS: u32 = 2000;
 const FIRST_CHECK_MS: u32 = 30_000;
 const DAY_MS: u32 = 24 * 60 * 60 * 1000;
 const NIN_SELECT: u32 = 0x400;
@@ -121,6 +127,8 @@ struct App {
     engine: Option<JoinHandle<()>>,
     buffer_on: bool,
     recording: bool,
+    /// When the running recording began (for the timer on the settings page).
+    rec_started: Option<std::time::Instant>,
     last_file: Option<PathBuf>,
     icons: Vec<HICON>,
     shown_icon: usize,
@@ -173,6 +181,19 @@ struct App {
     rewritten_rx: Receiver<JobNote>,
     /// Videos whose chapters are waiting, being written, or failed (shown on the page).
     jobs: std::collections::HashMap<PathBuf, Job>,
+    /// Game processes already asked about (once per launch of a game).
+    game_asked: std::collections::HashSet<u32>,
+    /// The game the notification on screen asks about.
+    game_offer: Option<GameOffer>,
+    /// The game window being recorded after "record the window" (this run of Rewind).
+    game_hwnd: Option<isize>,
+}
+
+#[derive(Clone)]
+struct GameOffer {
+    hwnd: isize,
+    title: String,
+    exe: String,
 }
 
 /// What the settings page shows about updates.
@@ -324,8 +345,107 @@ impl App {
         self.push_files();
     }
 
-    /// A button on the "saved" notification was pressed.
+    /// Every couple of seconds: a game in full screen that is not being recorded gets an
+    /// offer to record its window; a game window recorded from such an offer that is gone
+    /// hands the recording back to what was recorded before.
+    fn check_game(&mut self) {
+        // The source was changed by hand since: nothing to go back to.
+        if self.settings.game_return.is_some() && !matches!(self.settings.source, SourceSetting::Window { .. }) {
+            self.settings.game_return = None;
+            self.game_hwnd = None;
+            self.save_settings();
+        }
+        if self.settings.game_return.is_some() {
+            let alive = match (self.game_hwnd, &self.settings.source) {
+                (Some(h), _) => sources::window_alive(h),
+                (None, SourceSetting::Window { title }) => sources::find_window(title).is_some(),
+                _ => true,
+            };
+            if !alive {
+                self.leave_game();
+                return;
+            }
+        }
+        // Recording a capture card (a console): what runs on the PC is not the game.
+        if matches!(self.settings.source, SourceSetting::Card { .. }) {
+            return;
+        }
+        if !self.settings.offer_game_window || self.recording {
+            return; // switching would end the recording: ask once it is stopped
+        }
+        let Some((hwnd, title)) = sources::fullscreen_window() else { return };
+        let Some(pid) = sources::window_pid(hwnd) else { return };
+        if pid == std::process::id() || self.game_asked.contains(&pid) {
+            return;
+        }
+        let recorded = match &self.settings.source {
+            SourceSetting::Window { title: t } => sources::find_window(t).map(|(h, _)| h) == Some(hwnd),
+            _ => false,
+        };
+        let Some(app) = sources::app_of_window(hwnd) else { return };
+        if recorded || app.exe == "explorer.exe" || self.settings.game_never.iter().any(|e| e.eq_ignore_ascii_case(&app.exe)) {
+            self.game_asked.insert(pid);
+            return;
+        }
+        self.game_asked.insert(pid);
+        log::line(&format!("full-screen program in front: {} ({}), offering its window", app.name, app.exe));
+        self.game_offer = Some(GameOffer { hwnd, title, exe: app.exe.clone() });
+        let actions = [("Записывать окно", ACT_GAME_YES), ("Не спрашивать", ACT_GAME_NEVER)];
+        let now = match self.settings.source {
+            SourceSetting::Window { .. } => "Сейчас записывается другое окно",
+            _ => "Сейчас записывается весь экран",
+        };
+        toast::show_with(Tone::Info, &format!("Записывать окно «{}»?", app.name), now, &actions);
+    }
+
+    /// "Record the window" on the offer: the game's window becomes the source; what was
+    /// recorded before is kept to come back to.
+    fn take_game(&mut self, offer: GameOffer) {
+        if !sources::window_alive(offer.hwnd) {
+            return;
+        }
+        if self.settings.game_return.is_none() {
+            self.settings.game_return =
+                Some(settings::GameReturn { source: self.settings.source.clone(), crop: self.settings.crop });
+        }
+        log::line(&format!("recording the game window \"{}\"", offer.title));
+        self.settings.source = SourceSetting::Window { title: offer.title };
+        self.settings.crop = None;
+        self.game_hwnd = Some(offer.hwnd);
+        self.settings_changed(true);
+        self.notify(Tone::Good, "Записывается окно игры", "Когда игра закроется, запись вернётся на экран");
+    }
+
+    /// The game window is gone: back to what was recorded before it (the primary display
+    /// if the source was not switched by the offer).
+    fn leave_game(&mut self) {
+        let back = self.settings.game_return.take();
+        self.game_hwnd = None;
+        let (source, crop) = match back {
+            Some(r) => (r.source, r.crop),
+            None => (SourceSetting::Primary, None),
+        };
+        log::line(&format!("the recorded window is gone, back to {source:?}"));
+        self.settings.source = source;
+        self.settings.crop = crop;
+        self.engine_cfg = None; // the engine waits for new settings even if they look the same
+        self.settings_changed(true);
+        self.notify(Tone::Info, "Окно закрыто", "Записывается экран");
+    }
+
+    /// A button on a notification was pressed.
     fn on_toast_action(&mut self, id: usize) {
+        if id == ACT_GAME_YES || id == ACT_GAME_NEVER {
+            let Some(offer) = self.game_offer.take() else { return };
+            if id == ACT_GAME_YES {
+                self.take_game(offer);
+            } else {
+                log::line(&format!("not asking about {} again", offer.exe));
+                self.settings.game_never.push(offer.exe);
+                self.settings_changed(true);
+            }
+            return;
+        }
         let Some(file) = self.last_file.clone() else { return };
         match id {
             ACT_OPEN => open_path(file, None),
@@ -410,7 +530,7 @@ impl App {
             Some(crate::capture::Source::Window(h)) => unsafe {
                 windows::Win32::Graphics::Gdi::MonitorFromWindow(HWND(h as _), windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST).0 as isize
             },
-            None => 0,
+            Some(crate::capture::Source::Card) | None => 0,
         };
         set(show, monitor);
     }
@@ -719,6 +839,10 @@ impl App {
         if save {
             self.save_settings();
         }
+        crate::skin::set(&self.settings.skin);
+        if let Some(ui) = &self.ui {
+            ui.fit();
+        }
         let taken = self.register_hotkeys();
         self.configure_pad();
         if !taken.is_empty() && taken != self.taken {
@@ -756,13 +880,21 @@ impl App {
             "settings": self.settings,
             "monitors": monitors,
             "windows": windows,
+            // Capture cards and cameras, for the source picker.
+            "cards": crate::card::devices(),
             // Programs with a window, for "sound only from this program".
             "apps": sources::apps()
                 .into_iter()
                 .filter(|a| a.pid != std::process::id())
                 .map(|a| json!({ "exe": a.exe, "name": a.name }))
                 .collect::<Vec<_>>(),
-            "status": { "buffer_on": self.buffer_on, "recording": self.recording, "has_last": self.last_file.is_some() },
+            "status": {
+                "buffer_on": self.buffer_on,
+                "recording": self.recording,
+                "has_last": self.last_file.is_some(),
+                // Seconds recorded so far; the page counts on from here by itself.
+                "rec_secs": self.rec_started.filter(|_| self.recording).map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0),
+            },
             "taken": self.taken,
             "pad": { "learning": self.pad_learning, "pads": self.pads, "hint": self.pad_hint },
             "folder": self.settings.output_dir().display().to_string(),
@@ -1084,6 +1216,7 @@ impl App {
             }
             Event::RecordingStarted(path) => {
                 self.recording = true;
+                self.rec_started = Some(std::time::Instant::now());
                 self.mark_count = 0; // markers are numbered within a recording
                 log::line(&format!("recording to {}", path.display()));
                 self.notify(Tone::Record, "Запись началась", "");
@@ -1114,11 +1247,21 @@ impl App {
             Event::NothingToSave => {
                 self.notify(Tone::Info, "Нечего сохранять", "Буфер повтора выключен или ещё пуст");
             }
-            Event::Stat(_) => {}
+            Event::Stat(text) => log::line(&format!("frames: {text}")),
+            Event::Saving => {
+                log::line("saving a clip");
+                let keep = duration_text(self.settings.buffer_seconds as u64);
+                self.notify(Tone::Info, "Сохраняю клип…", &format!("Последние {keep}"));
+            }
+            Event::SaveBusy => {
+                log::line("save pressed while a clip is still being written: ignored");
+                self.notify(Tone::Info, "Клип ещё сохраняется", "Новый можно будет сохранить, когда он допишется");
+            }
             Event::Error(text) => {
                 log::line(&format!("error: {text}"));
                 self.notify(Tone::Error, "Ошибка записи", &text);
             }
+            Event::SourceGone => self.leave_game(),
         }
         self.update_tray();
         self.push_state();
@@ -1160,7 +1303,7 @@ impl App {
                 let current = match &s.source {
                     SourceSetting::Primary => m.primary,
                     SourceSetting::Monitor { device } => device == &m.name,
-                    SourceSetting::Window { .. } => false,
+                    SourceSetting::Window { .. } | SourceSetting::Card { .. } => false,
                 };
                 let label =
                     format!("Экран {} — {}×{}{}", i + 1, m.width(), m.height(), if m.primary { ", основной" } else { "" });
@@ -1294,6 +1437,13 @@ impl App {
                 if let Some(button) = other.strip_prefix("pad_nav ").and_then(|n| n.trim().parse::<usize>().ok()) {
                     unsafe {
                         let _ = PostMessageW(Some(self.hwnd), gamepad::WM_PAD_NAV, WPARAM(button), LPARAM(0));
+                    }
+                    return;
+                }
+                // Test hook: "toast_action 10" as if that notification button was pressed.
+                if let Some(id) = other.strip_prefix("toast_action ").and_then(|n| n.trim().parse::<usize>().ok()) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.hwnd), toast::WM_TOAST_ACTION, WPARAM(id), LPARAM(0));
                     }
                     return;
                 }
@@ -1624,6 +1774,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == TIMER_GAME => {
+            with_app(|app| app.check_game());
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == TIMER_UPDATE => {
             // First check shortly after start, then once a day.
             SetTimer(Some(hwnd), TIMER_UPDATE, DAY_MS, None);
@@ -1804,6 +1958,7 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         engine: None,
         buffer_on: false,
         recording: false,
+        rec_started: None,
         last_file: None,
         icons: Vec::new(),
         shown_icon: 0,
@@ -1842,6 +1997,9 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         rewrite_tx,
         rewritten_rx,
         jobs: Default::default(),
+        game_asked: Default::default(),
+        game_offer: None,
+        game_hwnd: None,
     };
     if first_run {
         app.save_settings(); // so the file exists for editing
@@ -1873,6 +2031,9 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
             SetTimer(Some(hwnd), TIMER_UPDATE, FIRST_CHECK_MS, None);
         }
     }
+    unsafe {
+        SetTimer(Some(hwnd), TIMER_GAME, GAME_CHECK_MS, None);
+    }
     let taken = app.register_hotkeys();
     app.taken = taken.clone();
     app.configure_pad();
@@ -1883,6 +2044,8 @@ pub fn run(data: Option<PathBuf>, background: bool, wait_pid: Option<u32>) -> Re
         log::line(&format!("hotkeys taken by another program: {}", taken.join(", ")));
         app.notify(Tone::Error, "Клавиша занята другой программой", &taken.join(", "));
     }
+    crate::skin::init();
+    crate::skin::set(&app.settings.skin);
     toast::set_owner(hwnd);
     APP.with(|cell| *cell.borrow_mut() = Some(app));
     if first_run && !background {

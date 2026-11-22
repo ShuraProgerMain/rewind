@@ -71,12 +71,7 @@ const PICK_MS: u32 = 3000;
 const TIMER_PICK: usize = 1;
 const TIMER_BAR: usize = 2;
 
-const BACKGROUND: u32 = 0x001F_1F1F; // COLORREF is 0x00BBGGRR
-const FIELD: u32 = 0x002C_2C2C;
-const BORDER: u32 = 0x003A_3A3A;
-const TITLE: u32 = 0x00FF_FFFF;
-const DETAIL: u32 = 0x00B4_B0AE;
-const ACCENT: u32 = 0x00FF_840A; // #0a84ff
+// Colours come from the skin (crate::skin::palette()).
 
 struct State {
     hwnd: HWND,
@@ -90,6 +85,8 @@ struct State {
     /// Heading, field and list text, hint.
     fonts: Option<(HFONT, HFONT, HFONT)>,
     field_brush: HBRUSH,
+    /// The skin the fonts and the field brush were made for.
+    skin_play: bool,
     old_edit_proc: WNDPROC,
     /// Cards closed and not yet collected by the owner (one may close as the next opens).
     results: Vec<(u64, Option<String>)>,
@@ -208,7 +205,8 @@ fn scale(v: i32, dpi: u32) -> i32 {
 }
 
 unsafe fn font(px: i32, weight: i32) -> HFONT {
-    CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, Default::default(), Default::default(), Default::default(), CLEARTYPE_QUALITY, 0, w!("Segoe UI"))
+    let face = if crate::skin::play() { w!("Rubik") } else { w!("Segoe UI") };
+    CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, Default::default(), Default::default(), Default::default(), CLEARTYPE_QUALITY, 0, face)
 }
 
 /// Rows under the field: the presets and "no title" (none at all without presets).
@@ -283,8 +281,6 @@ unsafe fn create(owner: HWND) -> Option<State> {
     }
     let round: u32 = 2; // DWMWCP_ROUND
     let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const u32 as *const c_void, 4);
-    let border: u32 = BORDER;
-    let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const u32 as *const c_void, 4);
     Some(State {
         hwnd,
         edit,
@@ -294,7 +290,8 @@ unsafe fn create(owner: HWND) -> Option<State> {
         heading: Vec::new(),
         dpi: 96,
         fonts: None,
-        field_brush: CreateSolidBrush(COLORREF(FIELD)),
+        field_brush: CreateSolidBrush(COLORREF(crate::skin::palette().field)),
+        skin_play: crate::skin::play(),
         old_edit_proc,
         results: Vec::new(),
         presets: Vec::new(),
@@ -343,8 +340,15 @@ pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], from_pad: b
         }
         let (mut dx, mut dy) = (96u32, 96u32);
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
-        if s.dpi != dx.max(48) || s.fonts.is_none() {
+        let play = crate::skin::play();
+        if s.dpi != dx.max(48) || s.fonts.is_none() || s.skin_play != play {
             s.dpi = dx.max(48);
+            s.skin_play = play;
+            let _ = DeleteObject(HGDIOBJ(s.field_brush.0));
+            s.field_brush = CreateSolidBrush(COLORREF(crate::skin::palette().field));
+            // The play skin draws its own gradient edge; the standard one a grey hairline.
+            let border: u32 = if play { 0xFFFF_FFFE /* DWMWA_COLOR_NONE */ } else { crate::skin::palette().border };
+            let _ = DwmSetWindowAttribute(s.hwnd, DWMWA_BORDER_COLOR, &border as *const u32 as *const c_void, 4);
             if let Some((a, b, c)) = s.fonts.take() {
                 let _ = DeleteObject(HGDIOBJ(a.0));
                 let _ = DeleteObject(HGDIOBJ(b.0));
@@ -353,7 +357,9 @@ pub fn open(owner: HWND, id: u64, heading: &str, presets: &[String], from_pad: b
             s.fonts = Some((font(scale(14, s.dpi), 600), font(scale(15, s.dpi), 400), font(scale(12, s.dpi), 400)));
         }
         let (field_top, _, _, height) = layout(rows(s));
-        let (w, h) = (scale(WIDTH, s.dpi), scale(height, s.dpi));
+        // The play skin's countdown bar sits above its gradient edge: a little more room.
+        let extra = if play { 6 } else { 0 };
+        let (w, h) = (scale(WIDTH, s.dpi), scale(height + extra, s.dpi));
         let x = (info.rcMonitor.left + info.rcMonitor.right - w) / 2;
         let y = info.rcMonitor.top + scale(48, s.dpi);
         let (pad, field) = (scale(PAD, s.dpi), scale(FIELD_HEIGHT, s.dpi));
@@ -546,9 +552,15 @@ unsafe fn paint(hwnd: HWND) {
         let d = |v: i32| scale(v, s.dpi);
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
-        let bg = CreateSolidBrush(COLORREF(BACKGROUND));
+        let pal = crate::skin::palette();
+        let play = crate::skin::play();
+        let bg = CreateSolidBrush(COLORREF(pal.background));
         FillRect(dc, &rc, bg);
         let _ = DeleteObject(HGDIOBJ(bg.0));
+        if play {
+            use crate::skin::{ring, window_radius, Fill, RING};
+            ring(dc, rc, window_radius(s.dpi), d(2) as f32, Fill::Gradient(RING.0, RING.1));
+        }
         let Some((head_font, text_font, hint_font)) = s.fonts else { return };
         SetBkMode(dc, TRANSPARENT);
         let count = rows(s);
@@ -556,7 +568,7 @@ unsafe fn paint(hwnd: HWND) {
         let flags = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
 
         let old = SelectObject(dc, HGDIOBJ(head_font.0));
-        SetTextColor(dc, COLORREF(TITLE));
+        SetTextColor(dc, COLORREF(pal.title));
         let mut heading = s.heading.clone();
         let mut top = RECT { left: d(PAD), top: d(PAD), right: rc.right - d(PAD), bottom: d(PAD + HEADING) };
         DrawTextW(dc, &mut heading, &mut top, flags);
@@ -564,21 +576,33 @@ unsafe fn paint(hwnd: HWND) {
         let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
         let old_brush = SelectObject(dc, HGDIOBJ(s.field_brush.0));
         let r = d(8);
-        let _ = RoundRect(dc, d(PAD), d(field_top), rc.right - d(PAD) + 1, d(field_top + FIELD_HEIGHT) + 1, r, r);
+        let field_rc = RECT { left: d(PAD), top: d(field_top), right: rc.right - d(PAD), bottom: d(field_top + FIELD_HEIGHT) };
+        if play {
+            use crate::skin::{argb, fill_round, ring, Fill};
+            fill_round(dc, field_rc, d(10) as f32, Fill::Solid(argb(pal.field)));
+            let edge = if s.focused { 0xFF8A_A6FF } else { 0x26FF_FFFF };
+            ring(dc, field_rc, d(10) as f32, d(1) as f32, Fill::Solid(edge));
+        } else {
+            let _ = RoundRect(dc, field_rc.left, field_rc.top, field_rc.right + 1, field_rc.bottom + 1, r, r);
+        }
         // The presets and "no title", the highlighted one marked.
         SelectObject(dc, HGDIOBJ(text_font.0));
-        let accent = CreateSolidBrush(COLORREF(ACCENT));
+        let accent = CreateSolidBrush(COLORREF(pal.accent));
         for i in 0..count {
             let y = d(list_top + i as i32 * ROW);
             let row = RECT { left: d(PAD), top: y, right: rc.right - d(PAD), bottom: y + d(ROW - 2) };
             let chosen = s.selected == Some(i);
-            if chosen {
+            if chosen && play {
+                use crate::skin::{fill_round, ring, Fill, RING};
+                fill_round(dc, row, d(10) as f32, Fill::Solid(0xFF2A_2440));
+                ring(dc, row, d(10) as f32, d(2) as f32, Fill::Gradient(RING.0, RING.1));
+            } else if chosen {
                 SelectObject(dc, HGDIOBJ(accent.0));
                 let r = d(6);
                 let _ = RoundRect(dc, row.left, row.top, row.right + 1, row.bottom + 1, r, r);
             }
             let preset = i < s.presets.len();
-            SetTextColor(dc, COLORREF(if chosen || preset { TITLE } else { DETAIL }));
+            SetTextColor(dc, COLORREF(if chosen || preset { pal.title } else { pal.detail }));
             let label = if preset { s.presets[i].clone() } else { "Без заголовка".to_string() };
             let mut text: Vec<u16> = label.encode_utf16().collect();
             let mut text_rc = RECT { left: row.left + d(10), right: row.right - d(10), ..row };
@@ -588,15 +612,25 @@ unsafe fn paint(hwnd: HWND) {
         if s.countdown {
             let left = (PICK_MS as u64).saturating_sub(GetTickCount64().saturating_sub(s.stepped_at)) as f64 / PICK_MS as f64;
             let full = rc.right - 2 * d(PAD);
-            let bar = RECT { left: d(PAD), top: rc.bottom - d(3), right: d(PAD) + (full as f64 * left) as i32, bottom: rc.bottom - d(1) };
-            FillRect(dc, &bar, accent);
+            if play {
+                use crate::skin::{fill_round, Fill, GRADIENT};
+                let track = RECT { left: d(PAD), top: rc.bottom - d(11), right: rc.right - d(PAD), bottom: rc.bottom - d(7) };
+                fill_round(dc, track, d(2) as f32, Fill::Solid(0x14FF_FFFF));
+                let bar = RECT { right: d(PAD) + (full as f64 * left) as i32, ..track };
+                if bar.right - bar.left > d(4) {
+                    fill_round(dc, bar, d(2) as f32, Fill::Gradient(GRADIENT.0, GRADIENT.1));
+                }
+            } else {
+                let bar = RECT { left: d(PAD), top: rc.bottom - d(3), right: d(PAD) + (full as f64 * left) as i32, bottom: rc.bottom - d(1) };
+                FillRect(dc, &bar, accent);
+            }
         }
         let _ = DeleteObject(HGDIOBJ(accent.0));
         SelectObject(dc, old_brush);
         SelectObject(dc, old_pen);
 
         SelectObject(dc, HGDIOBJ(hint_font.0));
-        SetTextColor(dc, COLORREF(DETAIL));
+        SetTextColor(dc, COLORREF(pal.detail));
         let hint = if s.countdown {
             "Сочетание — дальше · A — сохранить · печатайте — свой текст"
         } else if count == 0 {
@@ -640,8 +674,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CTLCOLOREDIT => {
             let dc = HDC(wparam.0 as _);
-            SetTextColor(dc, COLORREF(TITLE));
-            SetBkColor(dc, COLORREF(FIELD));
+            SetTextColor(dc, COLORREF(crate::skin::palette().title));
+            SetBkColor(dc, COLORREF(crate::skin::palette().field));
             let brush = STATE.with(|cell| cell.borrow().as_ref().map(|s| s.field_brush)).unwrap_or_default();
             LRESULT(brush.0 as isize)
         }

@@ -48,6 +48,8 @@ impl Default for SoundFrom {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub source: Source,
+    /// The capture card, when `source` is `Source::Card`.
+    pub card: Option<crate::card::CardSpec>,
     pub fps: u32,
     pub video: VideoCfg,
     /// Length of the replay buffer in seconds.
@@ -110,9 +112,16 @@ pub enum Event {
     NothingToMark,
     /// "Save" was pressed while the replay buffer is off or still empty.
     NothingToSave,
-    /// Periodic numbers for the console (only with `verbose`).
+    /// Periodic numbers: frames captured, repeated and skipped (logged every 30 s).
     Stat(String),
+    /// "Save" was taken: the clip is being written.
+    Saving,
+    /// "Save" was pressed while the previous clip is still being written.
+    SaveBusy,
     Error(String),
+    /// The captured window closed (or the display went away). Capture waits for new
+    /// settings (or Quit); a running recording is finished first.
+    SourceGone,
 }
 
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
@@ -220,9 +229,10 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
     let monitor = match cfg.source {
         Source::Monitor(h) => h,
         Source::Window(h) => unsafe { MonitorFromWindow(HWND(h as _), MONITOR_DEFAULTTONEAREST).0 as isize },
+        Source::Card => crate::sources::monitors().first().map(|m| m.handle).unwrap_or(0),
     };
     let gpu = create_gpu(monitor, cfg.force_vendor)?;
-    let mut cap = Capture::new(&gpu, cfg.source, cfg.fps, cfg.cursor)?;
+    let mut cap = Capture::new(&gpu, cfg.source, cfg.card.as_ref(), cfg.fps, cfg.cursor)?;
     let (sw, sh) = cap.size();
     let (ox, oy, w, h) = match cfg.crop {
         Some((x, y, w, h)) => {
@@ -250,8 +260,14 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                 (Kind::App(AppTarget::Window(hwnd)), format!("Sound: {name}"))
             }
             Source::Monitor(_) => (Kind::System, "System sound".to_string()),
+            Source::Card => (Kind::System, "System sound".to_string()),
         },
         SoundFrom::App { exe, name } => (Kind::App(AppTarget::Exe(exe.clone())), format!("Sound: {name}")),
+    };
+    // A capture card: its own sound (the console) takes the place of the computer's.
+    let (system, system_title) = match (&cfg.source, cfg.card.as_ref().and_then(|c| c.audio.clone())) {
+        (Source::Card, Some(id)) => (Kind::Endpoint(id), format!("Sound: {}", cfg.card.as_ref().map(|c| c.label.as_str()).unwrap_or("card"))),
+        _ => (system, system_title),
     };
     for (on, kind, title) in [(cfg.audio_system, system, system_title), (cfg.audio_mic, Kind::Mic, "Microphone".to_string())] {
         if on {
@@ -263,7 +279,9 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
     let (wtx, wrx) = channel::<WMsg>();
     let fps = cfg.fps;
     let writer_emit = emit.clone();
-    let writer = thread::spawn(move || writer_thread(wrx, infos, fps, writer_emit));
+    let saving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_saving = saving.clone();
+    let writer = thread::spawn(move || writer_thread(wrx, infos, fps, writer_emit, writer_saving));
 
     let span_us = cfg.buffer_secs as i64 * 1_000_000;
     let mut ring = Ring::new(span_us, cfg.ring_mb << 20);
@@ -289,6 +307,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
     // Counters for the periodic status line.
     let (mut n_new, mut n_dup, mut n_skipped, mut n_bytes) = (0u32, 0u32, 0i64, 0usize);
     let mut stat_at = Instant::now();
+    let (mut enc_total, mut enc_max, mut enc_n) = (Duration::ZERO, Duration::ZERO, 0u32);
 
     let result: Result<()> = (|| {
         loop {
@@ -321,6 +340,8 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                     Cmd::SaveClip => {
                         if !st.buffer_on || ring.bytes() == 0 {
                             emit(Event::NothingToSave);
+                        } else if saving.load(std::sync::atomic::Ordering::Relaxed) {
+                            emit(Event::SaveBusy);
                         } else if pending_save.is_none() {
                             let pressed_us = idx * 1_000_000 / cfg.fps as i64;
                             pending_save = Some((pressed_us, idx + cfg.fps as i64)); // wait at most 1 s
@@ -358,7 +379,21 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                 }
             }
             if cap.is_closed() {
-                anyhow::bail!("the captured window or display is gone");
+                // Not an error: a game was closed. Say so and wait for a new source.
+                emit(Event::SourceGone);
+                loop {
+                    match rx.recv() {
+                        Ok(Cmd::SetConfig(c)) => {
+                            exit = Exit::Restart(*c);
+                            return Ok(());
+                        }
+                        Ok(Cmd::Quit) | Err(_) => {
+                            exit = Exit::Quit;
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                    }
+                }
             }
 
             let frame = cap.latest()?;
@@ -368,6 +403,7 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                 n_dup += 1;
             }
             let buffer_on = st.buffer_on;
+            let encode_started = Instant::now();
             let sent = enc.encode(frame.as_ref(), idx, force_key, &mut |p: Pkt| {
                 n_bytes += p.data.len();
                 if recording {
@@ -378,6 +414,10 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                 }
             })?;
             drop(frame);
+            let took = encode_started.elapsed();
+            enc_total += took;
+            enc_max = enc_max.max(took);
+            enc_n += 1;
             while let Ok(p) = arx.try_recv() {
                 n_bytes += p.data.len();
                 if recording {
@@ -394,6 +434,8 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
                     if pk.is_empty() {
                         emit(Event::NothingToSave);
                     } else {
+                        saving.store(true, std::sync::atomic::Ordering::Relaxed);
+                        emit(Event::Saving);
                         let _ = wtx.send(WMsg::Save(pk, out_path(cfg, "Клип", "mp4")?, marks.clone()));
                     }
                 }
@@ -403,18 +445,21 @@ fn pipeline(cfg: &Config, rx: &Receiver<Cmd>, st: &mut State, emit: &Emit) -> Re
             }
             last_idx = idx;
 
-            if cfg.verbose && stat_at.elapsed() >= Duration::from_secs(5) {
+            if stat_at.elapsed() >= Duration::from_secs(if cfg.verbose { 5 } else { 30 }) {
                 let secs = stat_at.elapsed().as_secs_f64();
                 emit(Event::Stat(format!(
-                    "new {:.1} fps, repeated {:.1} fps, skipped {}, {:.1} Mbit/s, buffer {:.0} s / {:.1} MB",
+                    "new {:.1} fps, repeated {:.1} fps, skipped {}, convert+encode {:.1} ms avg / {:.1} ms max, {:.1} Mbit/s, buffer {:.0} s / {:.1} MB",
                     n_new as f64 / secs,
                     n_dup as f64 / secs,
                     n_skipped,
+                    enc_total.as_secs_f64() * 1000.0 / enc_n.max(1) as f64,
+                    enc_max.as_secs_f64() * 1000.0,
                     n_bytes as f64 * 8.0 / secs / 1e6,
                     ring.span() as f64 / 1e6,
                     ring.bytes() as f64 / 1048576.0
                 )));
                 (n_new, n_dup, n_skipped, n_bytes) = (0, 0, 0, 0);
+                (enc_total, enc_max, enc_n) = (Duration::ZERO, Duration::ZERO, 0u32);
                 stat_at = Instant::now();
             }
         }
@@ -449,8 +494,9 @@ fn chapters_for(marks: &mut [Mark], titles: &std::collections::HashMap<u64, Stri
     crate::marks::chapters(&markers, secs)
 }
 
-fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit: Emit) {
+fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit: Emit, saving: Arc<std::sync::atomic::AtomicBool>) {
     let titles = std::cell::RefCell::new(std::collections::HashMap::<u64, String>::new());
+    let mut savers: Vec<thread::JoinHandle<()>> = Vec::new();
     struct Rec {
         mux: Muxer,
         path: PathBuf,
@@ -499,7 +545,16 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
                 }
             }
             WMsg::Save(packets, path, marks) => {
+                // On its own thread: a long buffer is gigabytes, and writing it must not hold
+                // up the running recording or "stop" (seen: commands done minutes late).
+                let (infos, titles_now, emit, busy) = (infos.clone(), titles.borrow().clone(), emit.clone(), saving.clone());
+                savers.push(thread::spawn(move || {
+                let titles = std::cell::RefCell::new(titles_now);
                 let t = Instant::now();
+                // Test aid: REWIND_TEST_SLOW_SAVE_MS makes a clip take that long, like gigabytes would.
+                if let Some(ms) = std::env::var("REWIND_TEST_SLOW_SAVE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                    thread::sleep(Duration::from_millis(ms));
+                }
                 let res: Result<(u64, u64, Vec<Mark>)> = (|| {
                     let mut m = Muxer::create(&path, &infos, false)?;
                     // The clip's markers are known before it is written: they become chapters.
@@ -527,9 +582,15 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
                     }
                     Err(e) => emit(Event::Error(format!("could not save the clip: {e:#}"))),
                 }
+                busy.store(false, std::sync::atomic::Ordering::Relaxed);
+                }));
             }
             WMsg::Quit => break,
         }
+        savers.retain(|h| !h.is_finished());
+    }
+    for h in savers {
+        let _ = h.join(); // a clip being written is finished before the pipeline goes
     }
     if let Some(r) = rec.take() {
         finish(r);
@@ -541,6 +602,7 @@ fn writer_thread(rx: Receiver<WMsg>, infos: Vec<Arc<StreamInfo>>, fps: u32, emit
 /// "Рабочий стол".
 fn subject(cfg: &Config) -> String {
     let app = match cfg.source {
+        Source::Card => return cfg.card.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| "Карта захвата".into()),
         Source::Window(hwnd) => crate::sources::app_of_window(hwnd),
         Source::Monitor(_) => {
             let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };

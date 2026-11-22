@@ -10,6 +10,7 @@
 mod app;
 mod audio;
 mod capture;
+mod card;
 mod cli;
 mod convert;
 mod d3d;
@@ -32,6 +33,7 @@ mod picker;
 mod ring;
 mod settings;
 mod shot;
+mod skin;
 mod settings_window;
 mod sources;
 mod toast;

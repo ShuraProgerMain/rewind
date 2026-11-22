@@ -28,9 +28,21 @@ use crate::d3d::Gpu;
 pub enum Source {
     Monitor(isize),
     Window(isize),
+    /// A capture card; which one is in the engine's config (`card`).
+    Card,
 }
 
+/// A screen or window (Windows Graphics Capture) or a capture card.
 pub struct Capture {
+    inner: Inner,
+}
+
+enum Inner {
+    Screen(Screen),
+    Card(crate::card::CardCapture),
+}
+
+struct Screen {
     _item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
@@ -41,7 +53,7 @@ pub struct Capture {
 
 /// One captured frame; the texture is valid until this is dropped.
 pub struct Frame {
-    frame: Direct3D11CaptureFrame,
+    frame: Option<Direct3D11CaptureFrame>,
     pub texture: ID3D11Texture2D,
     pub width: u32,
     pub height: u32,
@@ -49,19 +61,58 @@ pub struct Frame {
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        let _ = self.frame.Close();
+        if let Some(f) = &self.frame {
+            let _ = f.Close();
+        }
     }
 }
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 
 impl Capture {
-    pub fn new(gpu: &Gpu, source: Source, fps: u32, cursor: bool) -> Result<Self> {
+    pub fn new(gpu: &Gpu, source: Source, card: Option<&crate::card::CardSpec>, fps: u32, cursor: bool) -> Result<Self> {
+        let inner = match source {
+            Source::Card => {
+                let spec = card.ok_or_else(|| anyhow::anyhow!("no capture card chosen"))?;
+                Inner::Card(crate::card::CardCapture::new(gpu, &spec.name, spec.mode)?)
+            }
+            _ => Inner::Screen(Screen::new(gpu, source, fps, cursor)?),
+        };
+        Ok(Self { inner })
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        match &self.inner {
+            Inner::Screen(s) => s.size(),
+            Inner::Card(c) => c.size(),
+        }
+    }
+
+    /// True once the captured window, monitor or card is gone.
+    pub fn is_closed(&self) -> bool {
+        match &self.inner {
+            Inner::Screen(s) => s.is_closed(),
+            Inner::Card(c) => c.is_closed(),
+        }
+    }
+
+    /// Newest frame since the last call, if the picture changed.
+    pub fn latest(&mut self) -> Result<Option<Frame>> {
+        match &mut self.inner {
+            Inner::Screen(s) => s.latest(),
+            Inner::Card(c) => Ok(c.latest().map(|(texture, width, height)| Frame { frame: None, texture, width, height })),
+        }
+    }
+}
+
+impl Screen {
+    fn new(gpu: &Gpu, source: Source, fps: u32, cursor: bool) -> Result<Self> {
         unsafe {
             let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
             let item: GraphicsCaptureItem = match source {
                 Source::Monitor(h) => interop.CreateForMonitor(HMONITOR(h as _))?,
                 Source::Window(h) => interop.CreateForWindow(HWND(h as _))?,
+                Source::Card => anyhow::bail!("not a screen"),
             };
 
             let dxgi: IDXGIDevice = gpu.device.cast()?;
@@ -90,17 +141,16 @@ impl Capture {
         }
     }
 
-    pub fn size(&self) -> (u32, u32) {
+    fn size(&self) -> (u32, u32) {
         (self.pool_size.Width.max(0) as u32, self.pool_size.Height.max(0) as u32)
     }
 
-    /// True once the captured window or monitor is gone.
-    pub fn is_closed(&self) -> bool {
+    fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
 
     /// Newest frame since the last call, if the picture changed. Older queued frames are discarded.
-    pub fn latest(&mut self) -> Result<Option<Frame>> {
+    fn latest(&mut self) -> Result<Option<Frame>> {
         let mut newest: Option<Direct3D11CaptureFrame> = None;
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             if let Some(old) = newest.replace(frame) {
@@ -113,7 +163,7 @@ impl Capture {
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
         let out = Frame {
-            frame,
+            frame: Some(frame),
             texture,
             width: content.Width.min(self.pool_size.Width).max(0) as u32,
             height: content.Height.min(self.pool_size.Height).max(0) as u32,
@@ -131,7 +181,7 @@ impl Capture {
     }
 }
 
-impl Drop for Capture {
+impl Drop for Screen {
     fn drop(&mut self) {
         let _ = self.session.Close();
         let _ = self.pool.Close();

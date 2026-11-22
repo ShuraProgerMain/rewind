@@ -56,12 +56,8 @@ const FADE_OUT_MS: u64 = 260;
 const MAX_ALPHA: f32 = 247.0;
 const TICK_MS: u32 = 15;
 
-const BACKGROUND: u32 = 0x001F_1F1F; // COLORREF is 0x00BBGGRR
-const BORDER: u32 = 0x003A_3A3A;
+// Colours come from the skin (crate::skin::palette()); this one is the standard look's text.
 const TITLE: u32 = 0x00FF_FFFF;
-const DETAIL: u32 = 0x00B4_B0AE;
-const BUTTON: u32 = 0x0033_3333;
-const BUTTON_HOVER: u32 = 0x0047_4747;
 
 static OWNER: AtomicIsize = AtomicIsize::new(0);
 
@@ -80,6 +76,7 @@ enum Phase {
 
 struct Fonts {
     dpi: u32,
+    play: bool,
     title: HFONT,
     detail: HFONT,
     icon: HFONT,
@@ -101,6 +98,7 @@ struct State {
     /// Where each button is (client coordinates), filled in when painting.
     rects: Vec<RECT>,
     hover: Option<usize>,
+    tone: Tone,
     /// The pointer is on the card: it does not fade away meanwhile.
     pointer: bool,
 }
@@ -152,9 +150,6 @@ unsafe fn create() -> Option<State> {
     // Windows 11 rounds the corners and draws the hairline border for us.
     let round: u32 = 2; // DWMWCP_ROUND
     let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const u32 as *const c_void, 4);
-    let border: u32 = BORDER;
-    let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const u32 as *const c_void, 4);
-
     Some(State {
         hwnd,
         title: Vec::new(),
@@ -168,6 +163,7 @@ unsafe fn create() -> Option<State> {
         actions: Vec::new(),
         rects: Vec::new(),
         hover: None,
+        tone: Tone::Info,
         pointer: false,
     })
 }
@@ -195,6 +191,10 @@ pub fn show_with(tone: Tone, title: &str, detail: &str, actions: &[(&str, usize)
         };
         s.glyph = [glyph];
         s.color = color;
+        s.tone = tone;
+        // The play skin draws its own gradient edge; the standard one a grey hairline.
+        let border: u32 = if crate::skin::play() { 0xFFFF_FFFE /* DWMWA_COLOR_NONE */ } else { crate::skin::palette().border };
+        let _ = DwmSetWindowAttribute(s.hwnd, DWMWA_BORDER_COLOR, &border as *const u32 as *const c_void, 4);
         s.title = title.encode_utf16().collect();
         s.detail = detail.encode_utf16().collect();
         s.actions = actions.iter().map(|(label, id)| (label.encode_utf16().collect(), *id)).collect();
@@ -298,18 +298,21 @@ unsafe fn text_width(dc: HDC, text: &[u16]) -> i32 {
 }
 
 unsafe fn paint(s: &mut State) {
-    if s.fonts.as_ref().map(|f| f.dpi) != Some(s.dpi) {
+    let play = crate::skin::play();
+    if s.fonts.as_ref().map(|f| (f.dpi, f.play)) != Some((s.dpi, play)) {
         if let Some(old) = s.fonts.take() {
             for f in [old.title, old.detail, old.icon, old.button] {
                 let _ = DeleteObject(f.into());
             }
         }
+        let face = crate::skin::face();
         s.fonts = Some(Fonts {
             dpi: s.dpi,
-            title: font(scale(15, s.dpi), 600, w!("Segoe UI Variable Text")),
-            detail: font(scale(13, s.dpi), 400, w!("Segoe UI Variable Text")),
-            icon: font(scale(20, s.dpi), 400, w!("Segoe Fluent Icons")),
-            button: font(scale(13, s.dpi), 500, w!("Segoe UI Variable Text")),
+            play,
+            title: font(scale(if play { 14 } else { 15 }, s.dpi), 600, face),
+            detail: font(scale(if play { 12 } else { 13 }, s.dpi), 400, face),
+            icon: font(scale(if play { 16 } else { 20 }, s.dpi), 400, w!("Segoe Fluent Icons")),
+            button: font(scale(if play { 12 } else { 13 }, s.dpi), 500, face),
         });
     }
     let Some(fonts) = s.fonts.as_ref() else { return };
@@ -318,23 +321,43 @@ unsafe fn paint(s: &mut State) {
     let dc = BeginPaint(s.hwnd, &mut ps);
     let mut rc = RECT::default();
     let _ = GetClientRect(s.hwnd, &mut rc);
-    let brush = CreateSolidBrush(COLORREF(BACKGROUND));
+    let pal = crate::skin::palette();
+    let brush = CreateSolidBrush(COLORREF(pal.background));
     FillRect(dc, &rc, brush);
     let _ = DeleteObject(brush.into());
     SetBkMode(dc, TRANSPARENT);
 
     let d = |v: i32| scale(v, s.dpi);
+    if play {
+        use crate::skin::{ring, window_radius, Fill, RING};
+        ring(dc, rc, window_radius(s.dpi), (s.dpi as f32 / 96.0).max(1.0), Fill::Gradient(RING.0, RING.1));
+    }
     let top = RECT { left: 0, top: 0, right: rc.right, bottom: d(HEIGHT) }; // text part
     let old = SelectObject(dc, fonts.icon.into());
-    SetTextColor(dc, COLORREF(s.color));
     let mut icon_rc = RECT { left: d(14), top: 0, right: d(14 + 28), bottom: top.bottom };
+    if play {
+        // A round tile behind the symbol: the gradient for news, a tint for the rest.
+        use crate::skin::{fill_round, Fill, GRADIENT};
+        let mid = top.bottom / 2;
+        icon_rc = RECT { left: d(14), top: mid - d(16), right: d(14 + 32), bottom: mid + d(16) };
+        let (fill, glyph) = match s.tone {
+            Tone::Good => (Fill::Solid(0x297B_E3B4), 0x00B4_E37B),
+            Tone::Record => (Fill::Gradient(0xFFF7_4754, 0xFFF2_94D1), 0x00FF_FFFF),
+            Tone::Error => (Fill::Solid(0x2EFF_9F0A), 0x000A_9FFF),
+            Tone::Info => (Fill::Gradient(GRADIENT.0, GRADIENT.1), 0x00FF_FFFF),
+        };
+        fill_round(dc, icon_rc, d(16) as f32, fill);
+        SetTextColor(dc, COLORREF(glyph));
+    } else {
+        SetTextColor(dc, COLORREF(s.color));
+    }
     DrawTextW(dc, &mut s.glyph, &mut icon_rc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
 
-    let text_left = d(54);
+    let text_left = d(if play { 58 } else { 54 });
     let text_right = rc.right - d(16);
     let single = DT_SINGLELINE | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS;
     SelectObject(dc, fonts.title.into());
-    SetTextColor(dc, COLORREF(TITLE));
+    SetTextColor(dc, COLORREF(pal.title));
     if s.detail.is_empty() {
         let mut r = RECT { left: text_left, top: 0, right: text_right, bottom: top.bottom };
         DrawTextW(dc, &mut s.title, &mut r, single | DT_VCENTER);
@@ -343,7 +366,7 @@ unsafe fn paint(s: &mut State) {
         let mut r = RECT { left: text_left, top: mid - d(21), right: text_right, bottom: mid };
         DrawTextW(dc, &mut s.title, &mut r, single | DT_VCENTER);
         SelectObject(dc, fonts.detail.into());
-        SetTextColor(dc, COLORREF(DETAIL));
+        SetTextColor(dc, COLORREF(pal.detail));
         let mut r = RECT { left: text_left, top: mid + d(1), right: text_right, bottom: mid + d(20) };
         DrawTextW(dc, &mut s.detail, &mut r, single | DT_VCENTER);
     }
@@ -358,12 +381,27 @@ unsafe fn paint(s: &mut State) {
         for (i, (label, _)) in s.actions.iter().enumerate() {
             let w = text_width(dc, label) + d(22);
             let r = RECT { left: x, top: y0, right: x + w, bottom: y1 };
-            let fill = CreateSolidBrush(COLORREF(if s.hover == Some(i) { BUTTON_HOVER } else { BUTTON }));
-            let old_brush = SelectObject(dc, fill.into());
-            let _ = RoundRect(dc, r.left, r.top, r.right + 1, r.bottom + 1, d(12), d(12));
-            SelectObject(dc, old_brush);
-            let _ = DeleteObject(fill.into());
-            SetTextColor(dc, COLORREF(TITLE));
+            let hover = s.hover == Some(i);
+            if play {
+                // Pills; the first one is the main action, in the gradient.
+                use crate::skin::{argb, fill_round, Fill, GRADIENT};
+                let fill = if i == 0 {
+                    Fill::Gradient(GRADIENT.0, GRADIENT.1)
+                } else {
+                    Fill::Solid(argb(if hover { pal.button_hover } else { pal.button }))
+                };
+                fill_round(dc, r, (r.bottom - r.top) as f32 / 2.0, fill);
+                if i == 0 && hover {
+                    fill_round(dc, r, (r.bottom - r.top) as f32 / 2.0, Fill::Solid(0x1FFF_FFFF));
+                }
+            } else {
+                let fill = CreateSolidBrush(COLORREF(if hover { pal.button_hover } else { pal.button }));
+                let old_brush = SelectObject(dc, fill.into());
+                let _ = RoundRect(dc, r.left, r.top, r.right + 1, r.bottom + 1, d(12), d(12));
+                SelectObject(dc, old_brush);
+                let _ = DeleteObject(fill.into());
+            }
+            SetTextColor(dc, COLORREF(pal.title));
             let mut label_rc = r;
             let mut text = label.clone();
             DrawTextW(dc, &mut text, &mut label_rc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);

@@ -16,6 +16,7 @@
   --edge: inset 0 0 0 1px rgba(255,255,255,.14);
   --menu-shadow: 0 0 0 1px rgba(0,0,0,.75), inset 0 0 0 1px rgba(255,255,255,.14), 0 12px 36px rgba(0,0,0,.55), 0 1px 3px rgba(0,0,0,.35);
   --font: "Inter", "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  --sheet: #202022;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -25,7 +26,7 @@
     --input: #fff; --input-edge: rgba(0,0,0,.16); --separator: rgba(0,0,0,.09);
     --track: rgba(0,0,0,.09); --push: rgba(0,0,0,.06); --push-hover: rgba(0,0,0,.12);
     --hover: rgba(0,0,0,.07); --seg-on: #fff;
-    --material: rgba(246,246,248,.72); --menu: rgba(246,246,248,.94);
+    --material: rgba(246,246,248,.72); --menu: rgba(246,246,248,.94); --sheet: #f4f4f6;
     --edge: none;
     --menu-shadow: 0 0 0 1px rgba(0,0,0,.17), 0 12px 36px rgba(0,0,0,.26), 0 1px 3px rgba(0,0,0,.12);
     color-scheme: light;
@@ -60,7 +61,7 @@ button { font: inherit; color: inherit; cursor: default; }
 .icon-btn svg { width: 16px; height: 16px; }
 
 /* ---------- actions ---------- */
-.actions { padding: 2px 18px 16px; display: flex; align-items: center; gap: 10px; }
+.actions { padding: 2px 18px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .push { height: 30px; min-width: 96px; padding: 0 14px; border: 0; border-radius: 7px; background: var(--push); white-space: nowrap; }
 .push:hover { background: var(--push-hover); }
 .push:disabled { opacity: .45; background: var(--push); }
@@ -194,10 +195,192 @@ body.trimming #trim { display: block; }
 .cols span:nth-child(3) { width: 176px; text-align: center; }
 .bad { color: var(--red); font-size: 11px; }
 
+/* ---------- source picker: live pictures of displays and windows ---------- */
+.picker { position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; background: var(--sheet); }
+.picker-head { flex: none; display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 12px 0 18px; border-bottom: 1px solid var(--separator); }
+.picker-head b { flex: 1; font-weight: 600; }
+.picker-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 18px 18px; }
+.picker-body::-webkit-scrollbar { width: 6px; }
+.picker-body::-webkit-scrollbar-thumb { background: var(--track); border-radius: 3px; }
+.picker h3 { margin: 12px 0 8px; font-size: 11px; font-weight: 600; color: var(--secondary); }
+.picker .grid { display: grid; gap: 10px; }
+.picker .grid.screens { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.picker .grid.windows { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.src { display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 0; border-radius: 9px; background: none; text-align: left; min-width: 0; }
+.src:hover { background: var(--hover); }
+.src .pic { position: relative; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; background: var(--track); display: grid; place-items: center; }
+.src .pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: var(--track); }
+.src .pic span { font-size: 11px; color: var(--secondary); }
+.src .cap { font-size: 12px; line-height: 16px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.src.on .pic { box-shadow: 0 0 0 2px var(--accent); }
+.src.on .cap { font-weight: 600; }
+html[data-skin="play"] .picker { background: #111218; backdrop-filter: none; }
+html[data-skin="play"] .picker-head { height: auto; padding: 16px 20px 12px; border-bottom: 0; }
+html[data-skin="play"] .picker-head b { font-size: 16px; }
+html[data-skin="play"] .picker-head .icon-btn { width: 32px; height: 32px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+html[data-skin="play"] .picker-body { padding: 0 20px 20px; }
+html[data-skin="play"] .picker h3 { display: flex; align-items: center; gap: 8px; margin: 8px 0 10px; font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+html[data-skin="play"] .picker h3::before { content: ""; width: 3px; height: 12px; border-radius: 2px; background: linear-gradient(180deg, #6bb8e6, #ed808c); }
+html[data-skin="play"] .src { padding: 6px 6px 8px; border-radius: 16px; background: rgba(255,255,255,.035); }
+html[data-skin="play"] .src:hover { background: rgba(255,255,255,.07); }
+html[data-skin="play"] .src .pic { border-radius: 11px; }
+html[data-skin="play"] .src .cap { font-size: 12.5px; padding: 0 2px; }
+html[data-skin="play"] .src.on { background: rgba(143,112,242,.14); }
+html[data-skin="play"] .src.on .pic { box-shadow: 0 0 0 2px #8f70f2, 0 0 16px rgba(130,140,255,.35); }
+
+/* ================= play skin: dark glass, the blue-violet-pink gradient, Rubik ================= */
+@font-face { font-family: "Rubik"; src: url("Rubik.ttf") format("truetype"); font-weight: 300 900; font-display: block; }
+.hero-badge, .hero-text { display: none; }
+html[data-skin="play"] {
+  --label: #eef0f6; --secondary: #a3a8c3; --placeholder: #7d8299;
+  --accent: #8f70f2; --green: #7be3b4; --red: #ff7a85;
+  --input: rgba(255,255,255,.05); --input-edge: rgba(255,255,255,.10); --separator: rgba(255,255,255,.06);
+  --track: rgba(255,255,255,.12); --push: rgba(255,255,255,.07); --push-hover: rgba(255,255,255,.12);
+  --hover: rgba(255,255,255,.05); --seg-on: transparent;
+  --menu: rgba(22,23,30,.98); --menu-shadow: 0 0 0 1px rgba(255,255,255,.10), 0 16px 40px rgba(0,0,0,.55);
+  --font: "Rubik", "Segoe UI", sans-serif; --edge: none;
+  --tile: linear-gradient(120deg, #385cf2, #8f70f2 55%, #f294d1);
+  --line: rgba(255,255,255,.08);
+  color-scheme: dark;
+}
+html[data-skin="play"] body {
+  display: flex; flex-direction: column;
+  background-color: #111218;
+  background-image: radial-gradient(520px 300px at 0% 0%, rgba(56,92,242,.16), transparent 70%), radial-gradient(420px 260px at 100% 0%, rgba(242,148,209,.09), transparent 70%);
+  font: 400 14px/1.4 var(--font); font-feature-settings: normal; -webkit-font-smoothing: antialiased;
+}
+html[data-skin="play"] svg { stroke-width: 1.8; }
+
+/* title bar: the program's name in a capsule with the two Joy-Con bars */
+html[data-skin="play"] .head { flex: none; height: 34px; padding: 0; margin: 16px 20px 0; gap: 8px; }
+html[data-skin="play"] .mark { display: none; }
+html[data-skin="play"] .head .title { flex: 1; }
+html[data-skin="play"] .head .title b { display: inline-flex; align-items: center; gap: 14px; height: 34px; padding: 0 16px 0 12px; border-radius: 17px;
+  background: rgba(14,15,20,.78); border: 1px solid rgba(255,255,255,.10); color: #dbdee6; font-weight: 500; font-size: 13px; }
+html[data-skin="play"] .head .title b::before { content: ""; width: 3px; height: 13px; border-radius: 2px; background: #6bb8e6; box-shadow: 4px 0 0 #ed808c; }
+html[data-skin="play"] .head .title span { display: none; }
+html[data-skin="play"] .head .icon-btn { width: 32px; height: 32px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid var(--line); color: var(--secondary); }
+html[data-skin="play"] .head .icon-btn svg { width: 14px; height: 14px; }
+
+/* the title bar holds it all: name, a status pill with the buffer switch, Save, record, close */
+.top { display: contents; }
+html[data-skin="play"] .top { flex: none; display: flex; align-items: center; gap: 8px; height: 34px; margin: 16px 20px 0; }
+html[data-skin="play"] .head, html[data-skin="play"] .actions { display: contents; }
+html[data-skin="play"] .actions .inline { order: 3; display: flex; flex: none; gap: 0; font-size: 0; margin-left: -50px; position: relative; }
+html[data-skin="play"] .head .title { flex: none; order: 1; }
+html[data-skin="play"] .hero-badge { display: none; }
+html[data-skin="play"] .hero-text { order: 2; flex: 0 1 auto; display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 52px 0 12px; border-radius: 17px;
+  background: rgba(14,15,20,.78); border: 1px solid rgba(255,255,255,.10); font-size: 13px; font-weight: 500; white-space: nowrap; min-width: 0; }
+html[data-skin="play"] .hero-text::before { content: ""; width: 8px; height: 8px; border-radius: 4px; flex: none; background: #7be3b4; box-shadow: 0 0 8px rgba(123,227,180,.7); }
+html[data-skin="play"] body[data-state="rec"] .hero-text::before { background: #f74754; box-shadow: 0 0 8px rgba(247,71,84,.8); }
+html[data-skin="play"] body[data-state="off"] .hero-text::before { background: #7d8299; box-shadow: none; }
+html[data-skin="play"] .hero-text .eyebrow { display: none; }
+html[data-skin="play"] .hero-text b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+html[data-skin="play"] #buffer { width: 38px; height: 24px; border-radius: 12px; position: relative; }
+html[data-skin="play"] #buffer::after { width: 18px; height: 18px; }
+html[data-skin="play"] #buffer.on::after { left: 17px; }
+html[data-skin="play"] .actions .spacer { display: block; order: 4; flex: 1; }
+html[data-skin="play"] .actions #save { order: 5; flex: none; height: 32px; padding: 0 14px; border-radius: 16px; font-size: 13px; background: var(--tile); border-color: transparent; color: #fff; }
+html[data-skin="play"] .actions #save:disabled { background: var(--push); color: var(--secondary); }
+html[data-skin="play"] .actions #record { order: 6; flex: none; width: 32px; height: 32px; min-width: 0; padding: 0; border-radius: 16px; font-size: 0;
+  background: rgba(255,255,255,.06); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; }
+html[data-skin="play"] .actions #record::before { content: ""; width: 10px; height: 10px; border-radius: 5px; background: #f74754; box-shadow: 0 0 10px rgba(247,71,84,.7); }
+html[data-skin="play"] body[data-state="rec"] .actions #record::before { border-radius: 2px; }
+html[data-skin="play"] .top::after { content: ""; order: 7; width: 1px; height: 20px; margin: 0 2px; background: rgba(255,255,255,.12); }
+html[data-skin="play"] .head #close { order: 8; }
+html[data-skin="play"] .sep { display: none; }
+
+/* buttons */
+html[data-skin="play"] .push { height: 40px; min-width: 0; padding: 0 18px; border-radius: 20px; border: 1px solid var(--line); background: var(--push); font: 500 14px var(--font); color: var(--label); }
+html[data-skin="play"] .push:hover { background: var(--push-hover); }
+html[data-skin="play"] .push.primary, html[data-skin="play"] .push.primary:hover { background: var(--tile); border-color: transparent; color: #fff; }
+html[data-skin="play"] .push.primary:hover { filter: brightness(1.08); }
+html[data-skin="play"] .push.stop, html[data-skin="play"] .push.stop:hover { background: linear-gradient(120deg, #f74754, #f294d1); border-color: transparent; color: #fff; }
+html[data-skin="play"] .push.small { height: 32px; padding: 0 14px; border-radius: 16px; font-size: 13px; }
+html[data-skin="play"] .push:disabled { opacity: .4; }
+
+/* tabs: one capsule across the window */
+html[data-skin="play"] .tabs { flex: none; display: block; padding: 0; margin: 12px 20px 0; }
+html[data-skin="play"] .tabs .seg { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); width: 100%; padding: 4px; border-radius: 22px; background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+html[data-skin="play"] .tabs .seg button { height: 34px; padding: 0; border-radius: 17px; color: var(--secondary); font: 500 13.5px var(--font); }
+html[data-skin="play"] .tabs .seg button.on { background: var(--tile); color: #fff; box-shadow: none; }
+
+/* the page: one glass card that scrolls */
+html[data-skin="play"] .page { flex: 1; min-height: 0; overflow-y: auto; margin: 12px 20px 20px; padding: 0 16px;
+  background: rgba(14,15,20,.86); border: 1px solid var(--line); border-radius: 20px; }
+html[data-skin="play"] .page::-webkit-scrollbar { width: 10px; }
+html[data-skin="play"] .page::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 5px; border: 3px solid #121319; }
+html[data-skin="play"] .row { min-height: 52px; padding: 8px 0; gap: 12px; }
+html[data-skin="play"] .row > .name { font-size: 14px; }
+html[data-skin="play"] .row > .name small { font-size: 12px; line-height: 1.35; margin-top: 2px; color: var(--secondary); }
+html[data-skin="play"] .row.tall { padding: 10px 0; }
+html[data-skin="play"] .note { padding: 10px 0 14px; font-size: 12px; line-height: 1.45; }
+html[data-skin="play"] .bad { font-size: 12px; }
+
+/* in-row segments, switch, pop-up */
+html[data-skin="play"] .page .seg { padding: 3px; border-radius: 19px; background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+html[data-skin="play"] .page .seg button { height: 28px; min-width: 56px; padding: 0 12px; border-radius: 14px; color: var(--secondary); font: 500 13px var(--font); }
+html[data-skin="play"] .page .seg button.on { background: var(--tile); color: #fff; box-shadow: none; }
+html[data-skin="play"] .switch { width: 46px; height: 28px; border-radius: 14px; background: rgba(255,255,255,.14); }
+html[data-skin="play"] .switch::after { left: 3px; top: 3px; width: 22px; height: 22px; box-shadow: 0 2px 6px rgba(0,0,0,.35); }
+html[data-skin="play"] .switch.on { background: var(--tile); }
+html[data-skin="play"] .switch.on::after { left: 21px; }
+html[data-skin="play"] .popup { height: 32px; padding: 0 10px 0 14px; border-radius: 16px; border: 1px solid var(--line); background: var(--input); font: 500 13px var(--font); }
+html[data-skin="play"] .popup:hover, html[data-skin="play"] .popup.open { background: var(--push-hover); }
+html[data-skin="play"] .menu { padding: 4px; border-radius: 14px; max-width: 360px; background: rgba(20,21,28,.98);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.09), 0 14px 36px rgba(0,0,0,.55); }
+html[data-skin="play"] .menu .item { height: 28px; padding: 0 12px 0 28px; border-radius: 8px; font-size: 13px; font-weight: 400; color: var(--label); }
+html[data-skin="play"] .menu .item:hover { background: rgba(143,112,242,.26); color: #fff; }
+html[data-skin="play"] .menu .item[aria-checked="true"] { font-weight: 500; }
+html[data-skin="play"] .menu .item svg { left: 9px; top: 8px; width: 12px; height: 12px; stroke: #b9a6ff; stroke-width: 2; }
+html[data-skin="play"] .menu .line { margin: 4px 8px; background: rgba(255,255,255,.07); }
+html[data-skin="play"] .menu .head-item { height: 24px; padding: 0 12px 0 28px; font-size: 10.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--secondary); }
+
+/* hotkeys */
+html[data-skin="play"] .key { height: 32px; border-radius: 12px; border: 1px solid var(--line); background: var(--input); font: 500 12px var(--font); }
+html[data-skin="play"] .keys .key { width: 140px; }
+html[data-skin="play"] .keys .key.pad { width: 150px; }
+html[data-skin="play"] .cols span:nth-child(2) { width: 140px; }
+html[data-skin="play"] .cols span:nth-child(3) { width: 150px; }
+html[data-skin="play"] .keys .row > .name { font-size: 13.5px; }
+html[data-skin="play"] .key.listening { border-color: transparent; background: linear-gradient(#15161d, #15161d) padding-box, linear-gradient(120deg, #4a6beb, #ed99db) border-box; border: 2px solid transparent; box-shadow: 0 0 16px rgba(130,140,255,.35); color: #fff; }
+html[data-skin="play"] .key.empty { border-style: dashed; border-color: rgba(255,255,255,.16); }
+html[data-skin="play"] .cols { padding: 12px 0 4px; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+html[data-skin="play"] input.presets { height: 32px; padding: 0 12px; border-radius: 12px; font: 400 13px var(--font); }
+
+/* recordings */
+html[data-skin="play"] .search { height: 40px; margin: 12px 0 8px; padding: 0 14px; border-radius: 20px; }
+html[data-skin="play"] .search:focus-within { border-color: #8aa6ff; box-shadow: none; }
+html[data-skin="play"] .search input { height: 36px; font-size: 14px; }
+html[data-skin="play"] .list { height: auto; overflow: visible; margin: 0 -8px; padding: 0 0 8px; }
+html[data-skin="play"] .day { padding: 12px 8px 6px; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+html[data-skin="play"] .file { height: 70px; padding: 0 8px; margin: 0; border-radius: 14px; gap: 12px; }
+html[data-skin="play"] .file img, html[data-skin="play"] .file .noimg { width: 96px; height: 54px; border-radius: 10px; }
+html[data-skin="play"] .file .info span { font-size: 12px; line-height: 1.4; margin-top: 2px; }
+html[data-skin="play"] .file .acts { gap: 8px; }
+html[data-skin="play"] .file .acts .icon-btn { width: 32px; height: 32px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+html[data-skin="play"] .file .pill { height: 22px; padding: 0 9px; border-radius: 11px; font-weight: 600; }
+html[data-skin="play"] .file .pill.ok { background: rgba(123,227,180,.13); }
+html[data-skin="play"] .file .pill.busy { background: rgba(107,184,230,.15); }
+html[data-skin="play"] .marks { margin: 0 8px 8px 116px; }
+html[data-skin="play"] .mrow { height: 40px; padding: 0 8px; border-radius: 10px; }
+html[data-skin="play"] .mrow:hover { background: rgba(255,255,255,.035); }
+html[data-skin="play"] .mrow input { height: 30px; border-radius: 8px; }
+html[data-skin="play"] div.empty { height: 160px; }
+
+/* trim view */
+html[data-skin="play"] #trim { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 20px 20px; }
+html[data-skin="play"] .stage { border-radius: 16px; }
+html[data-skin="play"] .timeline .bar { height: 6px; border-radius: 3px; }
+html[data-skin="play"] .timeline .sel { background: var(--tile); border-radius: 3px; }
+html[data-skin="play"] .times { font-size: 12px; }
+html[data-skin="play"] .trimnote { font-size: 12px; }
+
 </style>
 </head>
 <body>
 
+<div class="top">
 <div class="head" id="drag">
   <svg class="mark" id="mark" viewBox="0 0 22 22"><circle class="ring" cx="11" cy="11" r="8.6"/><circle class="dot" cx="11" cy="11" r="3.9"/></svg>
   <div class="title"><b>Rewind</b><span id="status"></span></div>
@@ -205,10 +388,13 @@ body.trimming #trim { display: block; }
 </div>
 
 <div class="actions">
+  <div class="hero-badge" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M4.5 10a5.5 5.5 0 1 0 1.6-3.9"/><path d="M4 3.5v3.2h3.2"/><path d="M10 7v3.2l2 1.3"/></svg><span class="dot"></span></div>
+  <div class="hero-text"><span class="eyebrow" id="hero-eyebrow"></span><b id="hero-title"></b></div>
   <button class="push" id="save"></button>
   <button class="push primary" id="record"></button>
   <div class="spacer"></div>
   <div class="inline">Буфер повтора <button class="switch" id="buffer"></button></div>
+</div>
 </div>
 <div class="sep"></div>
 
@@ -318,6 +504,67 @@ function openMenu(button) {
   let left = Math.min(b.left - 11, innerWidth - w - 4);
   menu.style.top = top + "px"; menu.style.left = Math.max(4, left) + "px";
 }
+// ---------- capture card ----------
+function cardRows(src) {
+  const mode = src.mode === "720p60" ? "720p60" : "1080p30";
+  return `<div class="row"><div class="name">Режим карты<small>720p при 60 к/с плавнее; 1080p у этой карты — только 30 к/с</small></div>
+      <div class="seg">${[["1080p30", "1080p · 30"], ["720p60", "720p · 60"]].map(([v, l]) => `<button class="${v === mode ? "on" : ""}" data-cmode="${v}">${l}</button>`).join("")}</div></div>
+    <div class="row"><div class="name">Название<small>Папка для записей с карты</small></div>
+      <input class="presets" data-clabel value="${esc(src.label || "")}" placeholder="Карта захвата" spellcheck="false" aria-label="Название для записей с карты"></div>`;
+}
+document.addEventListener("change", (e) => {
+  if (e.target.dataset && e.target.dataset.clabel !== undefined) {
+    set({ source: Object.assign({}, S.settings.source, { label: e.target.value.trim() }) });
+  }
+});
+
+// ---------- source picker ----------
+let pickerTimer = 0, pickerTick = 0;
+function sourceLabel() {
+  const it = sourceItems().find((x) => x.value && same(x.value, S.settings.source));
+  return it ? it.label : "—";
+}
+function srcCard(value, label, url) {
+  const on = same(value, S.settings.source);
+  return `<button class="src ${on ? "on" : ""}" data-src="${esc(JSON.stringify(value))}" aria-pressed="${on}">
+    <div class="pic">${url ? `<span>Нет картинки</span><img alt="" data-base="${url}" src="${url}&n=${pickerTick}" onerror="this.style.display='none'" onload="this.style.display=''">` : "<span>Камера — без превью</span>"}</div>
+    <div class="cap">${esc(label)}</div></button>`;
+}
+function openPicker() {
+  closePicker();
+  const screens = S.monitors.map((m) => srcCard(m.primary ? { type: "primary" } : { type: "monitor", device: m.device }, m.label, "source?m=" + encodeURIComponent(m.device))).join("");
+  const windows = S.windows.map((t) => srcCard({ type: "window", title: t }, t, "source?w=" + encodeURIComponent(t))).join("");
+  const now = S.settings.source;
+  const cards = (S.cards || []).map((n) => {
+    // The same card keeps its mode and folder name when picked again.
+    const value = now.type === "card" && now.name === n ? now : { type: "card", name: n, mode: "1080p30", label: "Карта захвата" };
+    // Only capture cards show a picture: a webcam would switch on (its light too) just
+    // because the picker was opened.
+    const card = /capture|hdmi|elgato|avermedia|cam ?link|game/i.test(n) && !/webcam|camera/i.test(n);
+    return srcCard(value, n, card ? "source?c=" + encodeURIComponent(n) : "");
+  }).join("");
+  const el = document.createElement("div");
+  el.className = "picker"; el.id = "picker"; el.setAttribute("role", "dialog"); el.setAttribute("aria-label", "Что записывать");
+  el.innerHTML = `<div class="picker-head"><b>Что записывать</b><button class="icon-btn" data-cmd="picker_close" aria-label="Закрыть"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+    <div class="picker-body"><h3>Экраны</h3><div class="grid screens">${screens}</div>
+    ${cards ? `<h3>Карты захвата и камеры</h3><div class="grid screens">${cards}</div>` : ""}
+    ${windows ? `<h3>Окна</h3><div class="grid windows">${windows}</div>` : ""}</div>`;
+  document.body.append(el);
+  const cur = el.querySelector(".src.on");
+  (cur || el.querySelector(".src")).focus();
+  // Live pictures while the picker is open: a fresh one every two seconds.
+  pickerTimer = setInterval(() => {
+    pickerTick++;
+    for (const img of el.querySelectorAll("img[data-base]")) img.src = img.dataset.base + "&n=" + pickerTick;
+  }, 2000);
+}
+function closePicker() {
+  clearInterval(pickerTimer);
+  const el = $("picker");
+  if (el) el.remove();
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("picker")) { e.preventDefault(); closePicker(); } });
+
 function closeMenu() {
   const wasOpen = !!$("menu");
   for (const el of document.querySelectorAll(".veil, .menu")) el.remove();
@@ -337,6 +584,7 @@ function sourceItems() {
     for (const t of S.windows) items.push({ label: t, value: { type: "window", title: t } });
   }
   const cur = S.settings.source;
+  if (cur.type === "card") items.push({ label: cur.name + ((S.cards || []).includes(cur.name) ? "" : " (не подключена)"), value: cur });
   if (cur.type === "window" && !S.windows.includes(cur.title)) items.push({ label: cur.title + " (закрыто)", value: cur });
   if (cur.type === "monitor" && !S.monitors.some((m) => m.device === cur.device)) items.push({ label: "Отключённый экран", value: cur });
   return items;
@@ -344,6 +592,7 @@ function sourceItems() {
 
 function pageCapture() {
   const s = S.settings, isWindow = s.source.type === "window";
+  const isCard = s.source.type === "card";
   MENUS.source = { items: sourceItems(), current: s.source, pick: (v) => set({ source: v, crop: null }) };
   MENUS.length = { items: LENGTHS.map((v) => ({ label: duration(v), value: v })), current: s.buffer_seconds, pick: (v) => set({ buffer_seconds: v }) };
   const marks = [["recording", "Во время записи"], ["always", "Всегда"], ["off", "Выключен"]];
@@ -354,14 +603,17 @@ function pageCapture() {
   const area = s.crop ? `${s.crop[2]}×${s.crop[3]}, от точки ${s.crop[0]}, ${s.crop[1]}` : (isWindow ? "Всё окно" : "Весь экран");
   const worst = Math.round(s.max_mbit * s.buffer_seconds / 8);
   return `
-    <div class="row"><div class="name">Что записывать</div>${popup("source", MENUS.source.items, s.source)}</div>
-    <div class="row"><div class="name">Область</div><div class="value">${esc(area)}</div>
+    <div class="row"><div class="name">Что записывать</div><button class="popup" data-cmd="picker"><span>${esc(sourceLabel())}</span>${CHEVRONS}</button></div>
+    ${s.source.type === "card" ? cardRows(s.source) : ""}
+    ${isCard ? "" : `<div class="row"><div class="name">Область</div><div class="value">${esc(area)}</div>
       ${s.crop ? '<button class="push small" data-cmd="clear_area">Сбросить</button>' : ""}
-      ${isWindow ? "" : '<button class="push small" data-cmd="pick_area">Выбрать…</button>'}</div>
+      ${isWindow ? "" : '<button class="push small" data-cmd="pick_area">Выбрать…</button>'}</div>`}
+    <div class="row"><div class="name">Предлагать окно игры<small>Игра открылась на весь экран — спросить, записывать ли её окно. Когда игра закроется, запись вернётся на экран</small></div><button class="switch ${s.offer_game_window !== false ? "on" : ""}" data-toggle="offer_game_window"></button></div>
+    ${(s.game_never || []).length ? `<div class="row"><div class="name">Не спрашивать для<small>${esc(s.game_never.join(", "))}</small></div><button class="push small" data-clear-never>Сбросить</button></div>` : ""}
     <div class="row"><div class="name">Длина буфера</div>${popup("length", MENUS.length.items, s.buffer_seconds)}</div>
     <div class="row"><div class="name">Память под буфер</div>${popup("memory", MENUS.memory.items, s.buffer_memory_mb)}</div>
     <div class="row"><div class="name">Индикатор на экране<small>В углу записываемого экрана; в запись не попадает</small></div>${popup("indicator", MENUS.indicator.items, s.indicator || "recording")}</div>
-    <div class="row"><div class="name">Указатель мыши в записи</div><button class="switch ${s.cursor ? "on" : ""}" data-toggle="cursor"></button></div>
+    ${isCard ? "" : `<div class="row"><div class="name">Указатель мыши в записи</div><button class="switch ${s.cursor ? "on" : ""}" data-toggle="cursor"></button></div>`}
     <div class="note">Буфер хранится в оперативной памяти уже сжатым. ${duration(s.buffer_seconds)} займут не больше ${size(Math.min(worst, s.buffer_memory_mb))}${worst > s.buffer_memory_mb ? " — при насыщенной картинке в память поместится меньше времени" : ", обычно в несколько раз меньше"}.</div>`;
 }
 
@@ -589,7 +841,8 @@ function pageSystem() {
     : `<button class="push small" data-cmd="check_update" ${u.state === "checking" ? "disabled" : ""}>Проверить</button>`;
   const version = `<div class="row"><div class="name">Rewind ${esc(S.version)}${about ? "<small>" + esc(about) + "</small>" : ""}</div>${real ? button : ""}</div>`;
   const log = '<div class="row"><div class="name">Журнал работы</div><button class="push small" data-cmd="open_log">Открыть</button></div>';
-  const notes = `<div class="row"><div class="name">Уведомления<small>Карточка в углу экрана; в запись не попадает</small></div><button class="switch ${s.notifications ? "on" : ""}" data-toggle="notifications"></button></div>`;
+  const look = `<div class="row"><div class="name">Оформление<small>Стандартное — как Windows; игровое — тёмное стекло и градиент</small></div>${seg("skin", [["standard", "Стандартное"], ["play", "Игровое"]], s.skin === "play" ? "play" : "standard")}</div>`;
+  const notes = look + `<div class="row"><div class="name">Уведомления<small>Карточка в углу экрана; в запись не попадает</small></div><button class="switch ${s.notifications ? "on" : ""}" data-toggle="notifications"></button></div>`;
   if (!real) {
     return notes + version + log + '<div class="note">Это переносная или тестовая копия со своей папкой настроек. Она не добавляет себя в меню «Пуск» и в автозапуск и сама не обновляется.</div>';
   }
@@ -604,15 +857,38 @@ function pageSystem() {
 
 const PAGES = { capture: pageCapture, video: pageVideo, sound: pageSound, keys: pageKeys, files: pageFiles, system: pageSystem };
 
+// ---------- recording timer ----------
+// The program says how long the recording has run when it sends its state; the page counts
+// on from there, once a second, without redrawing the whole window.
+let recSince = 0;
+function recClock(secs) {
+  const t = Math.max(0, Math.floor(secs));
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s2 = t % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s2).padStart(2, "0");
+}
+function statusText() {
+  const st = S.status, keep = duration(S.settings.buffer_seconds);
+  const time = st.recording ? recClock((Date.now() - recSince) / 1000) : "";
+  $("hero-title").textContent = st.recording ? (st.buffer_on ? "Запись " + time + " · буфер " + keep : "Запись " + time)
+    : st.buffer_on ? "Буфер · " + keep : "Буфер выключен";
+  $("status").textContent = st.recording
+    ? (st.buffer_on ? "Идёт запись · " + time + " · буфер хранит последние " + keep : "Идёт запись · " + time)
+    : (st.buffer_on ? "Буфер хранит последние " + keep : "Выключен — экран не захватывается");
+}
+setInterval(() => { if (S.status && S.status.recording) statusText(); }, 1000);
+
 function render() {
   stale = false;
   const s = S.settings, st = S.status;
   const keep = duration(s.buffer_seconds);
+  document.documentElement.dataset.skin = s.skin === "play" ? "play" : "standard";
+  document.body.dataset.state = st.recording ? "rec" : st.buffer_on ? "on" : "off";
+  $("hero-eyebrow").textContent = st.recording ? "Идёт запись" : st.buffer_on ? "Буфер повтора" : "Буфер выключен";
+  const play = s.skin === "play";
   $("mark").setAttribute("class", "mark " + (st.recording ? "rec" : st.buffer_on ? "on" : ""));
-  $("status").textContent = st.recording
-    ? (st.buffer_on ? "Идёт запись · буфер хранит последние " + keep : "Идёт запись")
-    : (st.buffer_on ? "Буфер хранит последние " + keep : "Выключен — экран не захватывается");
-  $("save").textContent = "Сохранить последние " + keep;
+  statusText();
+  $("save").textContent = play ? "Сохранить" : "Сохранить последние " + keep;
+  $("save").title = "Сохранить последние " + keep;
   $("save").disabled = !st.buffer_on;
   $("record").textContent = st.recording ? "Остановить запись" : "Начать запись";
   $("record").className = "push " + (st.recording ? "stop" : "primary");
@@ -691,7 +967,8 @@ function describe() {
 document.addEventListener("mousedown", (e) => {
   const p = e.target.closest("[data-popup]");
   if (p) { e.preventDefault(); openMenu(p); return; }   // menus open on press, like in macOS
-  if (e.target.closest("#drag") && !e.target.closest("button") && e.button === 0) cmd("drag");
+  const bar = e.target.closest("#drag") || (document.documentElement.dataset.skin === "play" && e.target.closest(".top"));
+  if (bar && !e.target.closest("button") && e.button === 0) cmd("drag");
 });
 document.addEventListener("click", (e) => {
   // A pop-up opens on mouse press (above). Enter, Space, screen readers and UI automation
@@ -700,6 +977,10 @@ document.addEventListener("click", (e) => {
   if (pop) { if (e.detail === 0) openMenu(pop); return; }
   const t = e.target.closest("button");
   if (!t) { if (listening) stopListening(); if (padLearning()) send({ t: "pad_learn", id: null }); return; }
+  if (t.dataset.src) { closePicker(); set({ source: JSON.parse(t.dataset.src), crop: null }); return; }
+  if (t.dataset.cmode) { set({ source: Object.assign({}, S.settings.source, { mode: t.dataset.cmode }) }); return; }
+  if (t.dataset.cmd === "picker") { openPicker(); return; }
+  if (t.dataset.cmd === "picker_close") { closePicker(); return; }
   if (t.dataset.pad) {
     if (listening) stopListening();
     send({ t: "pad_learn", id: padLearning() === t.dataset.pad ? null : t.dataset.pad });
@@ -723,6 +1004,7 @@ document.addEventListener("click", (e) => {
   }
   if (t.dataset.tab) { tab = t.dataset.tab; if (tab === "files") cmd("files"); render(); }
   else if (t.dataset.toggle) set({ [t.dataset.toggle]: !S.settings[t.dataset.toggle] });
+  else if (t.dataset.clearNever !== undefined) set({ game_never: [] });
   else if (t.dataset.seg) set({ [t.dataset.seg]: JSON.parse(t.dataset.value) });
   else if (t.dataset.cmd) cmd(t.dataset.cmd);
   else if (t.id === "save") cmd("save");
@@ -1048,6 +1330,7 @@ window.rewind = {
   files(list) { S.files = list; if (tab === "files" && !renaming) { if ($("menu") || listening || editingMark()) stale = true; else render(); } },
   update(state) {
     Object.assign(S, state);
+    if (S.status && S.status.recording) recSince = Date.now() - (S.status.rec_secs || 0) * 1000;
     if (listening || $("menu") || editingMark()) stale = true;
     else render();
   },

@@ -44,9 +44,20 @@ use wry::{Theme, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 // Design size in 96-dpi pixels.
 const WIDTH: i32 = 600;
 const HEIGHT: i32 = 524;
+/// The play skin has larger controls: a slightly taller window.
+const HEIGHT_PLAY: i32 = 560;
+
+fn height() -> i32 {
+    if crate::skin::play() {
+        HEIGHT_PLAY
+    } else {
+        HEIGHT
+    }
+}
 
 const PAGE: &str = include_str!("../ui/index.html");
 const FONT: &[u8] = include_bytes!("../ui/Inter.ttf");
+const RUBIK: &[u8] = include_bytes!("../ui/Rubik.ttf");
 
 /// Messages the window posts to its owner (the tray window).
 pub const WM_UI_CLOSE: u32 = 0x8000 + 5;
@@ -89,6 +100,7 @@ fn serve(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
     let (mime, body): (&str, &'static [u8]) = match request.uri().path() {
         "/" | "/index.html" => ("text/html; charset=utf-8", PAGE.as_bytes()),
         "/Inter.ttf" => ("font/ttf", FONT),
+        "/Rubik.ttf" => ("font/ttf", RUBIK),
         _ => {
             return Response::builder().status(404).body(Cow::Borrowed(&[][..])).expect("static response");
         }
@@ -159,7 +171,7 @@ impl SettingsWindow {
             let _ = GetMonitorInfoW(monitor, &mut info);
             let (mut dpi, mut dpi_y) = (96u32, 96u32);
             let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
-            let (w, h) = (WIDTH * dpi as i32 / 96, HEIGHT * dpi as i32 / 96);
+            let (w, h) = (WIDTH * dpi as i32 / 96, height() * dpi as i32 / 96);
             let x = (info.rcWork.left + info.rcWork.right - w) / 2;
             let y = (info.rcWork.top + info.rcWork.bottom - h) / 2;
 
@@ -261,6 +273,25 @@ impl SettingsWindow {
                         });
                         return;
                     }
+                    if request.uri().path() == "/source" {
+                        // The source picker's live pictures of displays and windows.
+                        let query = request.uri().query().unwrap_or_default().to_string();
+                        std::thread::spawn(move || {
+                            let value = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key)).map(crate::library::percent_decode);
+                            let picture = match (value("m="), value("w="), value("c=")) {
+                                (Some(device), _, _) => crate::sources::preview(crate::sources::Preview::Monitor(&device)),
+                                (None, Some(title), _) => crate::sources::preview(crate::sources::Preview::Window(&title)),
+                                (None, None, Some(card)) => crate::card::preview(&card, 320),
+                                _ => None,
+                            };
+                            let response = match picture {
+                                Some(bytes) => Response::builder().header("Content-Type", "image/bmp").header("Cache-Control", "no-store").body(Cow::Owned(bytes)),
+                                None => Response::builder().status(404).body(Cow::Borrowed(&[][..])),
+                            };
+                            responder.respond(response.expect("response"));
+                        });
+                        return;
+                    }
                     if request.uri().path() != "/thumb" {
                         responder.respond(serve(request));
                         return;
@@ -304,6 +335,28 @@ impl SettingsWindow {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// Takes the height of the current skin, keeping the window's centre.
+    pub fn fit(&self) {
+        unsafe {
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd).max(96) as i32;
+            let mut rc = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut rc);
+            let (w, h) = (WIDTH * dpi / 96, height() * dpi / 96);
+            if rc.bottom - rc.top == h {
+                return;
+            }
+            let y = (rc.top + rc.bottom - h) / 2;
+            let _ = SetWindowPos(self.hwnd, None, rc.left, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if let Some(webview) = &self.webview {
+            let (w, h) = (WIDTH as f64, height() as f64);
+            let _ = webview.set_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(w, h).into(),
+            });
+        }
     }
 
     /// Shows the window and brings it to the front.

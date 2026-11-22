@@ -37,8 +37,6 @@ pub enum Show {
 const MARGIN: i32 = 12;
 const HEIGHT: i32 = 26;
 const BACKGROUND: u32 = 0x001C_1C1E;
-const RED: u32 = 0x003A_45FF;
-const QUIET: u32 = 0x00A1_9C9C;
 const TEXT: u32 = 0x00FF_FFFF;
 
 struct State {
@@ -152,9 +150,11 @@ unsafe fn place(s: &mut State) {
     let (mut dx, mut dy) = (96u32, 96u32);
     let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
     s.dpi = dx.max(48);
+    // Rubik (the play skin) is wider than Segoe UI.
+    let play = crate::skin::play();
     let width = match s.show {
-        Show::Recording => 96,
-        _ => 72,
+        Show::Recording => if play { 108 } else { 96 },
+        _ => if play { 80 } else { 72 },
     };
     let (w, h, m) = (scale(width, s.dpi), scale(HEIGHT, s.dpi), scale(MARGIN, s.dpi));
     let _ = SetWindowPos(
@@ -170,27 +170,34 @@ unsafe fn place(s: &mut State) {
 }
 
 unsafe fn paint(s: &mut State) {
-    if s.font.map(|(d, _)| d) != Some(s.dpi) {
+    let play = crate::skin::play();
+    let key = s.dpi * 2 + play as u32; // the font is made for this DPI and skin
+    if s.font.map(|(k, _)| k) != Some(key) {
         if let Some((_, old)) = s.font.take() {
             let _ = DeleteObject(old.into());
         }
         let font = CreateFontW(
             -scale(12, s.dpi), 0, 0, 0, 600, 0, 0, 0,
             Default::default(), Default::default(), Default::default(), CLEARTYPE_QUALITY, 0,
-            w!("Segoe UI Variable Text"),
+            crate::skin::face(),
         );
-        s.font = Some((s.dpi, font));
+        s.font = Some((key, font));
     }
     let mut ps = PAINTSTRUCT::default();
     let dc = BeginPaint(s.hwnd, &mut ps);
     let mut rc = RECT::default();
     let _ = GetClientRect(s.hwnd, &mut rc);
-    let bg = CreateSolidBrush(COLORREF(BACKGROUND));
+    let pal = crate::skin::palette();
+    let bg = CreateSolidBrush(COLORREF(if play { pal.background } else { BACKGROUND }));
     FillRect(dc, &rc, bg);
     let _ = DeleteObject(bg.into());
 
     let d = |v: i32| scale(v, s.dpi);
-    let dot = CreateSolidBrush(COLORREF(if s.show == Show::Recording { RED } else { QUIET }));
+    if play {
+        use crate::skin::{ring, window_radius, Fill};
+        ring(dc, rc, window_radius(s.dpi), d(1) as f32, Fill::Solid(0x2EFF_FFFF));
+    }
+    let dot = CreateSolidBrush(COLORREF(if s.show == Show::Recording { pal.red } else { pal.quiet }));
     let old_brush = SelectObject(dc, dot.into());
     let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
     let cy = rc.bottom / 2;
@@ -202,7 +209,7 @@ unsafe fn paint(s: &mut State) {
     if let Some((_, font)) = s.font {
         let old = SelectObject(dc, font.into());
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, COLORREF(if s.show == Show::Recording { TEXT } else { QUIET }));
+        SetTextColor(dc, COLORREF(if s.show == Show::Recording { TEXT } else { pal.quiet }));
         let mut text: Vec<u16> = label(s).encode_utf16().collect();
         let mut r = RECT { left: d(26), top: 0, right: rc.right - d(8), bottom: rc.bottom };
         DrawTextW(dc, &mut text, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);

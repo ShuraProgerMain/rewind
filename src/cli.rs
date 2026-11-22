@@ -59,6 +59,7 @@ Hotkeys:  Ctrl+Alt+F10 save the replay buffer   Ctrl+Alt+F9 start/stop recording
 fn parse_args(args: &[String]) -> Result<Option<(Config, Vec<(f64, Cmd)>)>> {
     let mut cfg = Config {
         source: Source::Monitor(0),
+        card: None,
         fps: 60,
         video: VideoCfg { codec: Codec::Hevc, quality: 20, max_bitrate: 100_000_000, gop_secs: 2 },
         buffer_secs: 600,
@@ -238,6 +239,9 @@ fn print_event(ev: Event) {
         Event::NothingToSave => println!("replay buffer is off or empty, nothing to save"),
         Event::Marked { id, rec_secs } => println!("[mark] {id} at {rec_secs:?}"),
         Event::NothingToMark => println!("nothing is being captured, no mark placed"),
+        Event::SourceGone => println!("[source] the captured window closed; type quit"),
+        Event::Saving => println!("saving the clip..."),
+        Event::SaveBusy => println!("the previous clip is still being written"),
         Event::Stat(text) => println!("[stat] {text}"),
         Event::Error(text) => eprintln!("error: {text}"),
     }

@@ -48,9 +48,10 @@ fn grab(cfg: &Config) -> Result<(Vec<u8>, u32, u32)> {
     let monitor = match cfg.source {
         Source::Monitor(h) => h,
         Source::Window(h) => unsafe { MonitorFromWindow(HWND(h as _), MONITOR_DEFAULTTONEAREST).0 as isize },
+        Source::Card => crate::sources::monitors().first().map(|m| m.handle).unwrap_or(0),
     };
     let gpu = create_gpu(monitor, None)?;
-    let mut cap = Capture::new(&gpu, cfg.source, 60, cfg.cursor)?;
+    let mut cap = Capture::new(&gpu, cfg.source, cfg.card.as_ref(), 60, cfg.cursor)?;
     // The first frame arrives right after the session starts (a minimised window sends none).
     let deadline = Instant::now() + Duration::from_millis(1500);
     let frame = loop {

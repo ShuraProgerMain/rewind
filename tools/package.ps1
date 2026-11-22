@@ -38,6 +38,7 @@ foreach ($name in 'avcodec', 'avformat', 'avutil', 'swresample') {
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $app 'licenses\Rewind-MIT.txt')
 Copy-Item (Join-Path $ffmpeg 'LICENSE.txt') (Join-Path $app 'licenses\FFmpeg-LGPL.txt')
 Copy-Item (Join-Path $root 'ui\OFL.txt') (Join-Path $app 'licenses\Inter-OFL.txt')
+Copy-Item (Join-Path $root 'ui\OFL-Rubik.txt') (Join-Path $app 'licenses\Rubik-OFL.txt')
 @'
 Rewind is distributed under the MIT licence (Rewind-MIT.txt).
 
@@ -48,6 +49,7 @@ FFmpeg (avcodec, avformat, avutil, swresample DLLs) - LGPL v2.1 or later, see FF
   Source code: https://ffmpeg.org. You may replace the DLLs with your own build of the same version.
 
 Inter font - SIL Open Font License 1.1, see Inter-OFL.txt. https://rsms.me/inter/
+Rubik font - SIL Open Font License 1.1, see Rubik-OFL.txt. https://github.com/googlefonts/rubik
 '@ | Out-File (Join-Path $app 'licenses\README.txt') -Encoding ascii
 
 $zip = Join-Path $release "Rewind-$version-win64.zip"

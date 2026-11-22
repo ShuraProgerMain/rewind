@@ -26,6 +26,9 @@ pub enum SourceSetting {
     Monitor { device: String },
     /// The first window whose title contains this text.
     Window { title: String },
+    /// A capture card (video capture device) by its name; mode "1080p30" or "720p60"; the
+    /// name its recordings are filed under.
+    Card { name: String, #[serde(default)] mode: String, #[serde(default)] label: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -120,6 +123,23 @@ pub struct Settings {
     pub start_menu: bool,
     /// Look for a new version once a day and download it.
     pub auto_update: bool,
+    /// Look: "standard" (the system look) or "play" (dark glass and a gradient, like Game Goal).
+    pub skin: String,
+    /// Offer to record a game's window when one comes to the front in full screen.
+    pub offer_game_window: bool,
+    /// Programs (exe file names) for which the user said "do not ask".
+    pub game_never: Vec<String>,
+    /// What was recorded before switching to a game's window from the offer; it comes
+    /// back when the game closes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_return: Option<GameReturn>,
+}
+
+/// The source (and its crop) to go back to after a game.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GameReturn {
+    pub source: SourceSetting,
+    pub crop: Option<[u32; 4]>,
 }
 
 impl Default for Settings {
@@ -149,6 +169,10 @@ impl Default for Settings {
             autostart: false,
             start_menu: true,
             auto_update: true,
+            skin: "standard".into(),
+            offer_game_window: true,
+            game_never: Vec::new(),
+            game_return: None,
         }
     }
 }
@@ -223,6 +247,19 @@ impl Settings {
                     sources::find_window(title).ok_or_else(|| anyhow!("no open window with \"{title}\" in its title"))?;
                 Source::Window(handle)
             }
+            SourceSetting::Card { name, .. } => {
+                anyhow::ensure!(crate::card::devices().iter().any(|d| d == name), "capture card \"{name}\" is not connected");
+                Source::Card
+            }
+        };
+        let card = match &self.source {
+            SourceSetting::Card { name, mode, label } => Some(crate::card::CardSpec {
+                name: name.clone(),
+                mode: crate::card::Mode::parse(mode),
+                audio: crate::card::audio_for(name).map(|(id, _)| id),
+                label: if label.trim().is_empty() { "Карта захвата".into() } else { label.trim().to_string() },
+            }),
+            _ => None,
         };
         let codec = match self.codec.to_ascii_lowercase().as_str() {
             "h264" | "avc" => Codec::H264,
@@ -231,7 +268,9 @@ impl Settings {
         };
         Ok(Config {
             source,
-            fps: self.fps.clamp(1, 240),
+            // A card gives the frames it gives: its mode sets the rate.
+            fps: card.as_ref().map(|c| c.mode.fps).unwrap_or(self.fps.clamp(1, 240)),
+            card,
             video: VideoCfg {
                 codec,
                 quality: self.quality.clamp(1, 51),

@@ -53,6 +53,8 @@ pub enum Kind {
     System,
     /// The default recording device.
     Mic,
+    /// One recording device by its endpoint id (a capture card's sound).
+    Endpoint(String),
     /// Only what one program (and the processes it started) plays.
     App(AppTarget),
 }
@@ -318,6 +320,9 @@ unsafe fn default_id(enumerator: &IMMDeviceEnumerator, kind: &Kind) -> Option<St
     if let Kind::App(target) = kind {
         return target.pid().map(|pid| format!("pid:{pid}"));
     }
+    if let Kind::Endpoint(id) = kind {
+        return Some(id.clone());
+    }
     let flow = if *kind == Kind::System { eRender } else { eCapture };
     let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).ok()?;
     let raw = device.GetId().ok()?;
@@ -398,8 +403,12 @@ unsafe fn open(enumerator: &IMMDeviceEnumerator, kind: &Kind, enc: &mut AacEncod
     if let Kind::App(target) = kind {
         return open_app(target, enc);
     }
-    let flow = if *kind == Kind::System { eRender } else { eCapture };
-    let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole)?;
+    let device = if let Kind::Endpoint(id) = kind {
+        enumerator.GetDevice(&windows::core::HSTRING::from(id.as_str()))?
+    } else {
+        let flow = if *kind == Kind::System { eRender } else { eCapture };
+        enumerator.GetDefaultAudioEndpoint(flow, eConsole)?
+    };
     let raw = device.GetId()?;
     let id = raw.to_string().unwrap_or_default();
     CoTaskMemFree(Some(raw.0 as *const c_void));

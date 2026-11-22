@@ -1,6 +1,6 @@
 [package]
 name = "rewind"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 build = "build.rs"
 
@@ -27,9 +27,12 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_Storage_Xps",
     "Win32_Graphics_Imaging",
     "Win32_UI_Input_XboxController",
     "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
     "Win32_Networking_WinHttp",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

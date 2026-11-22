@@ -14,6 +14,38 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 
+#[link(name = "gdi32")]
+extern "system" {
+    fn D3DKMTSetProcessSchedulingPriorityClass(process: windows::Win32::Foundation::HANDLE, class: i32) -> i32;
+}
+
+/// A game that keeps the GPU at 100 % would otherwise starve capture, conversion and encoding:
+/// in a busy scene only a fraction of the frames would make it (seen: ~22 of 60 in Call of
+/// Duty). OBS raises the same two priorities. Realtime needs administrator rights; high is
+/// the fallback. Done once per process.
+fn raise_gpu_priority(device: &ID3D11Device) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    unsafe {
+        if let Ok(dxgi) = device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
+            let _ = dxgi.SetGPUThreadPriority(7);
+        }
+    }
+    ONCE.call_once(|| unsafe {
+        let me = windows::Win32::System::Threading::GetCurrentProcess();
+        const HIGH: i32 = 4;
+        const REALTIME: i32 = 5;
+        let class = if D3DKMTSetProcessSchedulingPriorityClass(me, REALTIME) == 0 {
+            "realtime"
+        } else if D3DKMTSetProcessSchedulingPriorityClass(me, HIGH) == 0 {
+            "high"
+        } else {
+            "normal (could not raise)"
+        };
+        crate::log::line(&format!("GPU scheduling priority: {class}"));
+    });
+}
+
 pub const VENDOR_NVIDIA: u32 = 0x10DE;
 pub const VENDOR_AMD: u32 = 0x1002;
 pub const VENDOR_INTEL: u32 = 0x8086;
@@ -97,6 +129,7 @@ pub fn create_gpu(monitor: isize, force_vendor: Option<u32>) -> Result<Gpu> {
         // The encoder touches the device from its own threads.
         let mt: ID3D11Multithread = context.cast()?;
         let _ = mt.SetMultithreadProtected(true);
+        raise_gpu_priority(&device);
 
         Ok(Gpu { device, context, vendor: pick.vendor, name: pick.name })
     }

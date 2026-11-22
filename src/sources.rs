@@ -2,7 +2,10 @@
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::core::PWSTR;
 use windows::Win32::Foundation::CloseHandle;
@@ -14,8 +17,8 @@ use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
 };
 
 const MONITORINFOF_PRIMARY: u32 = 1;
@@ -99,6 +102,36 @@ unsafe fn is_app_window(hwnd: HWND) -> bool {
     let mut class = [0u16; 64];
     let n = GetClassNameW(hwnd, &mut class) as usize;
     !matches!(String::from_utf16_lossy(&class[..n]).as_str(), "Progman" | "WorkerW")
+}
+
+/// The window in front, if it covers its whole display (exclusive full screen or a
+/// borderless window): what games look like. (handle, title).
+pub fn fullscreen_window() -> Option<(isize, String)> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || !is_app_window(hwnd) {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let n = GetWindowTextW(hwnd, &mut buf);
+        if n <= 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        GetWindowRect(hwnd, &mut r).ok()?;
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+            return None;
+        }
+        let m = info.rcMonitor;
+        let covers = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
+        covers.then(|| (hwnd.0 as isize, String::from_utf16_lossy(&buf[..n as usize])))
+    }
+}
+
+/// Whether a window still exists.
+pub fn window_alive(hwnd: isize) -> bool {
+    unsafe { IsWindow(Some(HWND(hwnd as _))).as_bool() }
 }
 
 /// Visible top-level windows with a title: (handle, title).
@@ -222,5 +255,99 @@ pub fn find_process(exe: &str) -> Option<u32> {
         }
         let _ = CloseHandle(snap);
         found
+    }
+}
+
+/// What the source picker shows a picture of.
+pub enum Preview<'a> {
+    /// A display by its device name.
+    Monitor(&'a str),
+    /// The first window whose title contains this text.
+    Window(&'a str),
+}
+
+/// A small picture (BMP, 320 px wide) of a display or a window, for the source picker. None
+/// for a minimised or vanished window.
+pub fn preview(what: Preview) -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
+        SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HALFTONE, SRCCOPY,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    const WIDTH: i32 = 320;
+    unsafe {
+        let screen = GetDC(None);
+        // Where the picture comes from: the screen itself, or the window drawn into memory.
+        let (src_dc, sx, sy, sw, sh, cleanup): (_, i32, i32, i32, i32, Option<(windows::Win32::Graphics::Gdi::HDC, windows::Win32::Graphics::Gdi::HBITMAP)>) = match what {
+            Preview::Monitor(device) => {
+                let m = monitors().into_iter().find(|m| m.name == device)?;
+                (screen, m.rect.left, m.rect.top, m.width(), m.height(), None)
+            }
+            Preview::Window(title) => {
+                let (h, _) = find_window(title)?;
+                let hwnd = HWND(h as _);
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ReleaseDC(None, screen);
+                    return None;
+                }
+                let mut r = RECT::default();
+                GetWindowRect(hwnd, &mut r).ok()?;
+                let (w, hh) = (r.right - r.left, r.bottom - r.top);
+                if w < 16 || hh < 16 {
+                    let _ = ReleaseDC(None, screen);
+                    return None;
+                }
+                let dc = CreateCompatibleDC(Some(screen));
+                let bmp = CreateCompatibleBitmap(screen, w, hh);
+                SelectObject(dc, bmp.into());
+                // PW_RENDERFULLCONTENT: also windows drawn by the GPU (browsers, games).
+                let _ = PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(2));
+                (dc, 0, 0, w, hh, Some((dc, bmp)))
+            }
+        };
+        let (tw, th) = (WIDTH, (WIDTH * sh / sw.max(1)).clamp(40, 400));
+        let small_dc = CreateCompatibleDC(Some(screen));
+        let small = CreateCompatibleBitmap(screen, tw, th);
+        let old = SelectObject(small_dc, small.into());
+        SetStretchBltMode(small_dc, HALFTONE);
+        let _ = StretchBlt(small_dc, 0, 0, tw, th, Some(src_dc), sx, sy, sw, sh, SRCCOPY);
+        SelectObject(small_dc, old);
+        let row = ((tw * 3 + 3) & !3) as usize;
+        let mut px = vec![0u8; row * th as usize];
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: tw,
+                biHeight: th, // bottom-up, as a BMP file wants
+                biPlanes: 1,
+                biBitCount: 24,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let lines = GetDIBits(small_dc, small, 0, th as u32, Some(px.as_mut_ptr() as *mut _), &mut info, DIB_RGB_COLORS);
+        let _ = DeleteObject(small.into());
+        let _ = DeleteDC(small_dc);
+        if let Some((dc, bmp)) = cleanup {
+            let _ = DeleteDC(dc);
+            let _ = DeleteObject(bmp.into());
+        }
+        let _ = ReleaseDC(None, screen);
+        if lines == 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(54 + px.len());
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&((54 + px.len()) as u32).to_le_bytes());
+        out.extend_from_slice(&[0u8; 4]);
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&tw.to_le_bytes());
+        out.extend_from_slice(&th.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&[0u8; 24]);
+        out.extend_from_slice(&px);
+        Some(out)
     }
 }
